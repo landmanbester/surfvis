@@ -3,8 +3,8 @@ type: reference
 title: Migration from the optparse entry points
 description: Option-by-option mapping from the pre-hip-cargo surfvis/surfchi2/flagchi2 scripts to the single surfvis Typer app.
 tags: [migration, cli, breaking-changes]
-timestamp: 2026-10-14
-last_verified_commit: 81f37f1
+timestamp: 2026-11-05
+last_verified_commit: 2a97e03
 ---
 
 # Migration from the optparse entry points
@@ -46,7 +46,7 @@ Python parameter name and does not support explicit `param_decls`.
 | `--doacorr` | `--doacorr` / `--no-doacorr` | As above. |
 | `--scale` | `--scale` | Defaults to `None` (scale to 5 sigma) rather than `-1`. `-1` is still accepted. |
 | `--cmap` | `--cmap` | — |
-| `-o`, `--opdir` | `--opdir` | Defaults to `None`, which still resolves to `<ms>_<datacolumn>__plots`. |
+| `-o`, `--opdir` | `--opdir` | Defaults to `None`, which now resolves to `<ms name>_<datacolumn>__plots` in the working directory, not beside the MS (unwritable in a container). |
 
 ## `surfchi2` → `surfvis chi2`
 

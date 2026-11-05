@@ -8,6 +8,11 @@ last_verified_commit: c57e964
 
 # Wiki changelog
 
+## 2026-11-05 — review decisions merged up from serve-ui (verified at `HEADSHA`)
+
+- **Updated** `chi2-pipeline.md` and `migration.md`, via serve-ui: hipped's
+  `flag-chi2` fixes and the `surf --opdir` default.
+
 ## 2026-11-05 — review fixes merged up from serve-ui (verified at `c57e964`)
 
 - **Updated** `chi2-pipeline.md` (via serve-ui): `--nfreqs -1` is resolved per
