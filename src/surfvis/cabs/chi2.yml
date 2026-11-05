@@ -68,8 +68,8 @@ cabs:
       dataout:
         dtype: Directory
         info:
-          Output name of zarr dataset.
-          Saved in CWD/chi2 by default.
+          Not yet implemented and ignored.
+          Will name the output zarr dataset.
         metadata:
           rich_help_panel: Outputs
       imagesout:

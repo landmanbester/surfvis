@@ -22,7 +22,7 @@ MS = NewType("MS", Path)
 @stimela_output(
     dtype="Directory",
     name="dataout",
-    info="Output name of zarr dataset. Saved in CWD/chi2 by default.",
+    info="Not yet implemented and ignored. Will name the output zarr dataset.",
     metadata={"rich_help_panel": "Outputs"},
 )
 @stimela_output(
@@ -96,7 +96,7 @@ def chi2(
         Directory | None,
         typer.Option(
             parser=parse_upath,
-            help="Output name of zarr dataset. Saved in CWD/chi2 by default.",
+            help="Not yet implemented and ignored. Will name the output zarr dataset.",
             rich_help_panel="Outputs",
         ),
     ] = None,

@@ -33,7 +33,7 @@ def chi2(
         rcol: Residual column.
         wcol: Weight column. ``SIGMA_SPECTRUM`` initialises weights as 1/sigma**2.
         fcol: Flag column.
-        dataout: Output name of the zarr dataset. Defaults to ``$CWD/chi2``.
+        dataout: Not yet implemented; ignored.
         imagesout: Output folder for images. Defaults to ``$CWD/chi2``.
         nthreads: Number of worker processes (also the dask thread-pool size).
         ntimes: Number of unique times in each chunk. ``None`` means all of them.
@@ -44,10 +44,8 @@ def chi2(
 
     msname = str(ms).rstrip("/")
 
-    dataout = Path(str(dataout)) if dataout is not None else Path(os.getcwd()) / "chi2"
-    if dataout.is_dir():
-        print(f"Removing existing {dataout} folder")
-        shutil.rmtree(dataout)
+    if dataout is not None:
+        print("--dataout is not yet implemented; ignoring it")
 
     imagesout = Path(str(imagesout)) if imagesout is not None else Path(os.getcwd()) / "chi2"
     if imagesout.is_dir():
