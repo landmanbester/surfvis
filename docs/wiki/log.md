@@ -3,10 +3,21 @@ type: log
 title: Wiki changelog
 description: Chronological record of what changed in the wiki and why.
 timestamp: 2026-11-05
-last_verified_commit: 2a97e03
+last_verified_commit: 4e90452
 ---
 
 # Wiki changelog
+
+## 2026-11-05 — serve-ui review fixes (verified at `4e90452`)
+
+- **Updated** `web-app.md`: reversed cells follow the MS's antenna order; the
+  gain-table menu and its allow-list; chunks read one matrix (`cache=False`);
+  plots fetched by `app.js`; `hx-sync` on the grid; the scan select refreshes
+  the bins; what browsing the grid reads from the MS; stale worker signature
+  and xarray-ms version.
+- **Updated** `chi2-pipeline.md`: outputs are validated before deletion and
+  foreign directories refused; non-positive weights are flagged; the
+  `__main__` guard the spawn pool needs.
 
 ## 2026-11-05 — review decisions merged up from hipped (verified at `2a97e03`)
 

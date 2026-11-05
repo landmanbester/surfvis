@@ -4,7 +4,7 @@ title: Chi-squared pipeline
 description: How chi2 and flag-chi2 chunk a Measurement Set, what the numba kernels compute, how results are reduced, and where images land.
 tags: [chi2, flagging, dask, numba, daskms]
 timestamp: 2026-11-05
-last_verified_commit: 2a97e03
+last_verified_commit: 4e90452
 ---
 
 # Chi-squared pipeline
@@ -82,9 +82,18 @@ Output layout, rooted at `--imagesout` (default `$CWD/chi2`):
 <imagesout>/field<F>/spw<S>/scan<N>/combined_<S>.png           # each Stokes product, per scan
 ```
 
-`--imagesout` and `--dataout` are both **deleted and recreated** on every run.
-`--dataout` now writes the zarr its name always implied — see
-[web-app.md](web-app.md) for the layout. It is what `surfvis serve` reads.
+`--imagesout` and `--dataout` (default `$CWD/chi2.zarr`) are both **deleted
+and recreated** on every run, but only after the products, correlations and
+gains have been validated, so a run that was going to fail leaves the previous
+outputs alone. A path that exists and holds anything other than `field<N>`
+directories (plus zarr metadata, for `--dataout`) is refused before any work:
+`--dataout .` or a mistyped MS must not be removed. `--dataout` writes the zarr
+`surfvis serve` reads; see [web-app.md](web-app.md) for the layout.
+
+A weight that is not positive and finite is treated as flagged by
+`products.form`, before correction. A zero-weight unflagged visibility used to
+count as a degree of freedom for a correlation product while the Stokes product
+formed from it was flagged.
 
 The `--nthreads` value does double duty: it sizes the process pool *and* the
 dask `ThreadPool` set via `dask.config`.
@@ -93,6 +102,10 @@ dask `ThreadPool` set via `dask.config`.
 running by the time the executor is built, and forking a process with live
 threads deadlocks the children — the parent waits in `as_completed` forever,
 printing nothing. See [web-app.md](web-app.md) §The fork deadlock.
+
+Spawn re-imports `__main__` in every worker, so a script calling
+`surfvis.core.chi2.chi2` directly must do so under `if __name__ == "__main__":`
+or the pool fails with `BrokenProcessPool`. The CLI is unaffected.
 
 ## `flag-chi2` — flagging in place
 

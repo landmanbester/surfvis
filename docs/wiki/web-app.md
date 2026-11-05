@@ -3,8 +3,8 @@ type: reference
 title: Chi-squared browser
 description: How surfvis serve links surfchi2 output to on-demand baseline waterfalls, the waterfall's correction / Stokes / flag-version controls, and the xarray-ms facts it depends on.
 tags: [web, fastapi, htmx, xarray-ms, zarr]
-timestamp: 2026-10-16
-last_verified_commit: 1ab4f7c
+timestamp: 2026-11-05
+last_verified_commit: 4e90452
 ---
 
 # Chi-squared browser
@@ -26,8 +26,15 @@ surfvis serve --data chi2.zarr     →  heatmap grid + histogram
                                       waterfall PNG   (read from the MS)
 ```
 
-The MS is opened only when a waterfall is requested. Browsing the grid touches
-the zarr alone.
+The MS's visibilities are read only when a waterfall is requested. Browsing the
+grid reads the zarr plus two small MS subtables, `FIELD::NAME` for the field
+menu and `ANTENNA::POSITION` for baseline lengths (both cached; if the MS has
+moved they are left out rather than failing the page).
+
+`Chi2Store.chunk` indexes the one `(time bin, freq bin, product)` matrix before
+reading it, and groups are opened with `cache=False`. Reading `.values` on the
+whole variable loaded every bin of the scan, and xarray's default cache kept it:
+1.3 GB for one click on a MeerKAT-sized scan with `--ntimes 1`.
 
 ## The zarr contract
 
@@ -53,13 +60,15 @@ Two things are easy to get wrong here:
   clicked chunk on the scan's waterfall, and would have to re-derive the
   chunking from `--ntimes`/`--nfreqs`.
 
-`surfchisq_plot` returns `(field, spw, scan, chi2, counts)` and does not say
-which chunk it was. `core/chi2.py` therefore keys futures by `(ds, t, f, c)` in
-the parent — `futures[fut] = (i, t, f, c)` — rather than changing the worker.
+`surfchisq_products_plot` returns `(chi2, counts)`, each
+`(nproducts, nant, nant)`, and does not say which chunk it was.
+`core/chi2.py` therefore keys futures by `(ds, t, f)` in the parent --
+`futures[fut] = (i, t, f)` -- rather than changing the worker.
 
 ## xarray-ms facts this depends on
 
-Verified against 0.5.9 (see `tests/fixtures/ms.py`):
+Verified against the `0.4.0a*` line pinned in `pyproject.toml` (see
+`tests/fixtures/ms.py`):
 
 - Variables come out as `(time, baseline_id, frequency, polarization)`, which
   *is* the waterfall shape. No row-to-grid pivot is needed, unlike dask-ms.
@@ -118,10 +127,21 @@ product, via `utils/products.form` -- the same function `chi2` uses, so the two
 cannot drift apart. `chi2`'s recorded `DATA` is resolved to `VISIBILITY` before
 it reaches the menus, or the column would be listed twice.
 
-- **Gain table** is free text: a QuartiCal term (`gains.qc/NET`, or pfb's
-  `gains.qc::NET`). Gains are read only for the antennas in the partition and
-  apply on-grid only (see [chi2-pipeline.md](chi2-pipeline.md)). The term is
-  cached on the directory's mtime, so a re-solve is picked up.
+- **Gain table** is a menu, not free text: the term `chi2` used (the zarr's
+  `gtable` attr), any passed as `serve --gtable` (repeatable), and the terms in
+  `*.qc` directories next to the MS (`gains.find_terms`, re-scanned per
+  request). Anything else in the query string is refused, with a message that
+  does not reveal whether the path exists: the server has no authentication,
+  and `--host 0.0.0.0` is common on compute nodes. Gains are read only for the
+  antennas in the partition and apply on-grid only (see
+  [chi2-pipeline.md](chi2-pipeline.md)). The term is cached on the
+  directory's mtime, so a re-solve is picked up.
+- **Antenna order follows the MS.** The grid is symmetric, so a cell can ask
+  for `(q, p)` when the MS stores `(p, q)`. `msdata.waterfall` reads the
+  stored row and swaps the names to match it before building gain indices,
+  cross-hand labels and the title. Applying `G_p` and `G_q` from the request
+  to the `(q, p)` row used to corrupt half the grid's waterfalls whenever
+  gains were in play.
 - **Flag version** lists CASA's `<ms>.flagversions/FLAG_VERSION_LIST`
   (`name : comment` lines) where `flags.<name>` exists. Version tables are
   row-aligned with the main table, so the baseline's rows are found with an
@@ -214,9 +234,18 @@ Three layers, because the slow part is not always an htmx request:
   panel is usually below the fold when a cell is clicked.
 - The region a request will replace (`#heatmap`, `#waterfall`, `#selectors`)
   is dimmed between `htmx:beforeRequest` and `htmx:afterRequest`.
-- The PNGs are fetched by the browser, not htmx, and the waterfall PNG is where
-  the MS is actually read. Each sits in a `.plot.loading` wrapper showing a
-  spinner until the `<img>`'s `onload`.
+- The PNGs are not htmx requests, and the waterfall PNG is where the MS is
+  actually read. Each `<img data-plot>` sits in a `.plot.loading` wrapper
+  showing a spinner; `app.js` `fetch`es it on `htmx:afterSettle` and sets a
+  blob URL, so a failure's JSON detail arrives with the response. An
+  `onerror` handler used to re-request the URL to read it, redoing the read.
+- Cells inherit `hx-sync="this:replace"` from `.grid`: a new click or arrow
+  key aborts the previous waterfall request, so the outlined cell and the
+  waterfall cannot disagree. The heatmap is loaded once, by the selector
+  form's `load` trigger.
+- The scan select re-renders the selectors (`/scans`) like field and spw:
+  each scan has its own time and frequency bins. Bin, product and scale are
+  kept where the new scan has them.
 
 Static URLs carry `?v=<digest of the static files>`. `StaticFiles` sends no
 `Cache-Control`, so browsers cached the stylesheet heuristically and served
