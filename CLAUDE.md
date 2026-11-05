@@ -56,6 +56,15 @@ since python-casacore and numba make CI slow and brittle. Verify locally.
 `tests/fixtures/ms.py::make_ms` writes a real Measurement Set in under a second,
 with a deliberately bad baseline for the flagging tests to find.
 
+**On the `landmanbester` fork, everything runs natively.** Install
+`[full,web]` and pass `--backend native`, so a missing dependency raises
+instead of falling back to a container. `Publish Container` and `Update Cab
+Definitions` are disabled in the fork's Actions settings (`gh workflow
+disable`), not in the files: no images are pushed, the cabs' image tag is not
+reset on merge, and `_container_image.py` may name a stale image. Re-enabling
+is not needed when this merges back into `ratt-ru/surfvis`, whose workflows
+were never touched.
+
 ## Architecture
 
 Three layers, and the boundary between them is load-bearing:
