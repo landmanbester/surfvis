@@ -4,7 +4,7 @@ title: Chi-squared pipeline
 description: How chi2 and flag-chi2 chunk a Measurement Set, what the numba kernels compute, how results are reduced, and where images land.
 tags: [chi2, flagging, dask, numba, daskms]
 timestamp: 2026-11-05
-last_verified_commit: 023dc05
+last_verified_commit: 00cccac
 ---
 
 # Chi-squared pipeline
@@ -66,7 +66,9 @@ table are flagged.
    `utils.products.form`, calls the numba kernel `_surfchisq_slice` once per
    product, writes one PNG per product, and returns `(chi2, counts)` shaped
    `(nproducts, nant, nant)`. The parent keys futures by `(ds, t, f)`.
-4. The parent accumulates those into per-scan cubes and writes `combined.png`
+4. The parent adds those into one `(nproducts, nant, nant)` total per scan
+   (the zarr holds only these; memory does not grow with the number of
+   chunks) and writes `combined.png`
    per scan from the correlation products, plus `combined_<S>.png` for each
    Stokes product, as `chi2 / counts` with `NaN` where `counts == 0`.
 

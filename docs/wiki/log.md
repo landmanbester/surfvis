@@ -3,10 +3,21 @@ type: log
 title: Wiki changelog
 description: Chronological record of what changed in the wiki and why.
 timestamp: 2026-11-05
-last_verified_commit: 023dc05
+last_verified_commit: 00cccac
 ---
 
 # Wiki changelog
+
+## 2026-11-05 — flagging review fixes; whole-scan heatmaps (verified at `00cccac`)
+
+- **Updated** `web-app.md`: FLAG_ROW only ever set; undo clears only the
+  cells an edit set; failed writes put back; the backup taken in the
+  background at startup (503 until done), named to the microsecond; antenna
+  order from the MS (`stored_order`), since xarray-ms mislabels reversed
+  baselines; plane misses coalesced; widget teardown on swap.
+- **Updated** `web-app.md`, `chi2-pipeline.md`: the zarr holds per-scan
+  totals `(product, antenna1, antenna2)`; the viewer drops the time and
+  frequency bins and the chunk outline; old stores are summed on read.
 
 ## 2026-11-05 — serve-ui review fixes merged up (verified at `023dc05`)
 

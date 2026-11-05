@@ -4,7 +4,7 @@ title: Chi-squared browser
 description: How surfvis serve links surfchi2 output to on-demand baseline waterfalls, the waterfall's correction / Stokes / flag-version controls, and the xarray-ms facts it depends on.
 tags: [web, fastapi, htmx, xarray-ms, zarr]
 timestamp: 2026-11-05
-last_verified_commit: 023dc05
+last_verified_commit: 00cccac
 ---
 
 # Chi-squared browser
@@ -31,23 +31,26 @@ grid reads the zarr plus two small MS subtables, `FIELD::NAME` for the field
 menu and `ANTENNA::POSITION` for baseline lengths (both cached; if the MS has
 moved they are left out rather than failing the page).
 
-`Chi2Store.chunk` indexes the one `(time bin, freq bin, product)` matrix before
-reading it, and groups are opened with `cache=False`. Reading `.values` on the
-whole variable loaded every bin of the scan, and xarray's default cache kept it:
-1.3 GB for one click on a MeerKAT-sized scan with `--ntimes 1`.
+`Chi2Store.matrix` reads one product's `(antenna, antenna)` matrix, and groups
+are opened with `cache=False`, so xarray never keeps a whole variable.
 
 ## The zarr contract
 
-One group per `(field, spw, scan)`, because the number of time and frequency
-bins differs between them:
+One group per `(field, spw, scan)`, holding that scan's totals:
 
 ```
 chi2.zarr/field{F}/spw{S}/scan{N}
-  chi2, counts        (time_bin, freq_bin, product, antenna1, antenna2)
-  t0/tf               time-slot bounds of each time bin, within the scan
-  chan0/chanf         channel bounds of each frequency bin
+  chi2, counts        (product, antenna1, antenna2), summed over the scan
   attrs               ms, rcol, wcol, fcol, mcol, gtable, corr_labels, antenna_names
 ```
+
+The browser looks at one field, spw and scan at a time. `--ntimes` and
+`--nfreqs` chunk the work in `chi2` (and its per-chunk PNGs), not the data
+product: stores used to keep every `(time bin, freq bin)` chunk, with bin
+bounds to outline the clicked chunk on the waterfall. That made the heatmap
+a fragment of a scan, and `chi2` held every scan's dense cube in memory
+until the end. Stores in the old layout still open: `store._scan_totals`
+sums their bins one time bin at a time.
 
 Two things are easy to get wrong here:
 
@@ -55,15 +58,12 @@ Two things are easy to get wrong here:
   any `--stokes` (`I`, `V`). They are resolved from `POLARIZATION::CORR_TYPE`,
   not offsets into `--use-corrs`, and the waterfall forms the same label from
   the MS. Stores written before products existed have a `corr` axis instead;
-  `Chi2Store.bins` refuses them with a message to rerun `chi2`.
-- **Bin bounds must be stored.** Without `t0`/`chan0` the app cannot outline the
-  clicked chunk on the scan's waterfall, and would have to re-derive the
-  chunking from `--ntimes`/`--nfreqs`.
+  `Chi2Store.products` refuses them with a message to rerun `chi2`.
 
 `surfchisq_products_plot` returns `(chi2, counts)`, each
 `(nproducts, nant, nant)`, and does not say which chunk it was.
 `core/chi2.py` therefore keys futures by `(ds, t, f)` in the parent --
-`futures[fut] = (i, t, f)` -- rather than changing the worker.
+`futures[fut] = (i, t, f)` -- and adds each into its scan's total.
 
 ## xarray-ms facts this depends on
 
@@ -119,8 +119,8 @@ flag version, quantity. They recompute **the waterfall only**. The heatmap is
 what `chi2` measured, so the controls default to how it was formed (the zarr's
 `rcol`/`mcol`/`gtable` attrs and the selected product), and the panel shows a
 note once they no longer describe the same quantity. Recomputing the heatmap
-on the fly was ruled out: one chunk is every baseline across the chunk, which
-at MeerKAT scale is hundreds of MB per click.
+on the fly was ruled out: it is every baseline across the whole scan, which
+at MeerKAT scale is far too much to read per click.
 
 The plotted quantity is `inv(G_p) column inv(G_q)^H - model` formed into the
 product, via `utils/products.form` -- the same function `chi2` uses, so the two
@@ -181,8 +181,7 @@ histogram PNG is square, so the two render at the same size.
 The waterfall title carries the baseline length: the distance between the two
 `ANTENNA::POSITION` rows (ITRF metres), read once per MS with arcae
 (`msdata.baseline_length`). Its time axis is labelled in UTC; pixels stay in
-slot coordinates, since the chunk outline (and later, a flagging selection)
-uses them.
+slot coordinates, since flagging selections use them.
 
 The heatmap ships one JSON blob (`#grid-data`: antenna names, the χ²/dof
 matrix, antenna positions) rather than attributes on every cell. `app.js`
@@ -391,9 +390,9 @@ and calls `mount(root)`.
 so zooming and panning re-slice memory instead of re-reading the MS. The key is
 the MS fingerprint (storage mtimes), the gain term's mtime, and the baseline and
 settings (field, spw, scan, antennas, product, column, model, gtable, flag
-version). It is **not** keyed on quantity or on the chunk rectangle: another
-time or frequency bin of the same baseline hits the cache, and the route puts the
-chunk rectangle into the header itself. `invalidate(ms)` clears it (the flagger
+version). It is **not** keyed on quantity or on the heatmap's product, so
+another quantity, or the same baseline reached from another heatmap, hits the
+cache. `invalidate(ms)` clears it (the flagger
 calls it after a write). An entry holds the plane as complex64 and the flags as
 bool, `values` is dropped: about 9 bytes per cell, so 450 x 32768 is ~130 MB and
 four entries ~0.5 GB. Colour limits are cached per quantity on the entry
