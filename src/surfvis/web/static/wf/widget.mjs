@@ -36,6 +36,10 @@ export async function mount(root) {
   let drag = null;
   let controller = null; // aborts the in-flight fetch
   let blockReq = null; // the request the current block was fetched with
+  let refineSeq = 0;
+  // Everything registered outside the panel goes when the panel does, so a
+  // replaced panel (and its blocks and canvases) can be collected at once.
+  const life = new AbortController();
 
   const rect = () => ({
     x: MARGIN.left,
@@ -200,6 +204,7 @@ export async function mount(root) {
       return;
     }
     plot.classList.add("refining");
+    const seq = ++refineSeq;
     try {
       const decoded = await fetchBlock(req);
       if (decoded) {
@@ -210,7 +215,8 @@ export async function mount(root) {
     } catch (err) {
       if (err.name !== "AbortError") readout.textContent = `Could not refine: ${err.message}`;
     } finally {
-      plot.classList.remove("refining");
+      // An aborted refine must not clear the indicator of the one that replaced it.
+      if (seq === refineSeq) plot.classList.remove("refining");
     }
   }
 
@@ -302,20 +308,34 @@ export async function mount(root) {
     draw();
   });
   const onKey = (e) => {
-    if (!root.isConnected) return document.removeEventListener("keydown", onKey);
+    if (!root.isConnected) return teardown();
     if (e.key === "0" && view && !e.target.closest("input, select, textarea")) {
       view.reset();
       draw();
       scheduleRefine();
     }
   };
-  document.addEventListener("keydown", onKey);
+  document.addEventListener("keydown", onKey, { signal: life.signal });
   const observer = new ResizeObserver(() => {
-    if (!root.isConnected) return observer.disconnect();
+    if (!root.isConnected) return teardown();
     resize();
     draw();
     if (view) scheduleRefine();
   });
+  function teardown() {
+    life.abort();
+    observer.disconnect();
+    clearTimeout(refineTimer);
+    if (controller) controller.abort();
+  }
+  // htmx replaces the panel's container; let go before it does.
+  document.body.addEventListener(
+    "htmx:beforeSwap",
+    (e) => {
+      if (e.detail.target?.contains(root)) teardown();
+    },
+    { signal: life.signal },
+  );
 
   // First load: the whole plane at screen resolution, with the slot times and frequencies.
   resize();
