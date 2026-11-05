@@ -2,13 +2,13 @@
 type: log
 title: Wiki changelog
 description: Chronological record of what changed in the wiki and why.
-timestamp: 2026-10-16
-last_verified_commit: 1ab4f7c
+timestamp: 2026-11-05
+last_verified_commit: 853555a
 ---
 
 # Wiki changelog
 
-## 2026-11-05 — review fixes merged up from hipped
+## 2026-11-05 — review fixes merged up from hipped (verified at `853555a`)
 
 - **Updated** `chi2-pipeline.md`: `--nfreqs -1` is resolved per dataset (it
   leaked the first SPW's width into the rest). hipped also fixed the identical
