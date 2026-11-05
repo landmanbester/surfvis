@@ -8,9 +8,9 @@ which cells were flagged.
 
 Writes are guarded three ways. ``serve`` must be started with
 ``--allow-flagging``. Before the first write of a session the current FLAG is
-saved as a CASA flag version (:func:`save_flag_version`), restorable here or
-with CASA's ``flagmanager``. And every write records the cells' previous
-values, so :meth:`Flagger.undo` restores exactly what it changed.
+saved as a CASA flag version (:func:`save_flag_version`), restorable with
+CASA's ``flagmanager``. And every write records the cells it turned on, so
+:meth:`Flagger.undo` clears exactly those and nothing else.
 
 Design and plan: https://github.com/ratt-ru/surfvis/issues/16
 """
@@ -142,16 +142,22 @@ def _runs(values: np.ndarray) -> list[tuple[int, int]]:
     return list(zip(starts.tolist(), stops.tolist(), strict=True))
 
 
+class BackupPendingError(RuntimeError):
+    """Writes wait until the backup flag version is complete."""
+
+
 @dataclass
 class Edit:
-    """One applied selection: enough to undo it exactly."""
+    """One applied selection: exactly the cells it changed, so undo touches nothing else."""
 
     id: int
     rows: np.ndarray
     corr_idx: list[int]
-    # FLAG and FLAG_ROW of ``rows`` before the write.
-    flag: np.ndarray
-    flag_row: np.ndarray
+    # Indices into (rows, channel, correlation) of the FLAG cells this edit
+    # turned on. Cells already flagged are not recorded, so undo leaves them be.
+    changed: tuple[np.ndarray, np.ndarray, np.ndarray]
+    # Positions in ``rows`` whose FLAG_ROW this edit turned on.
+    row_set: np.ndarray
     cells: int
     newly_flagged: int
     description: str
@@ -162,14 +168,60 @@ class Flagger:
     """Applies and undoes flag edits on one Measurement Set, for one server session.
 
     The undo stack lives in this process only; the backup flag version taken
-    before the first write is the durable fallback.
+    before the first write is the durable fallback. An edit records only the
+    cells it changed, so undo leaves writes made since by anything else --
+    ``flag-chi2``, CASA, another server -- alone.
+
+    The backup copies the whole FLAG column, which on a large MS takes minutes.
+    :meth:`start_backup` runs it in a background thread (``serve`` does this
+    at startup) and writes wait for it; without that, the first write takes it
+    synchronously.
     """
 
     ms: str
     edits: list[Edit] = field(default_factory=list)
     backup: str | None = None
+    backup_error: str | None = None
     _lock: threading.Lock = field(default_factory=threading.Lock)
+    _backup_done: threading.Event = field(default_factory=threading.Event)
+    _backup_thread: threading.Thread | None = None
     _next_id: int = 1
+
+    @property
+    def backup_state(self) -> str:
+        """``none`` (not started), ``running``, ``done`` or ``failed``."""
+        if self.backup_error is not None:
+            return "failed"
+        if self._backup_done.is_set():
+            return "done"
+        return "running" if self._backup_thread is not None else "none"
+
+    def start_backup(self) -> None:
+        """Save FLAG as a flag version in a background thread; writes wait for it."""
+        if self._backup_thread is not None or self._backup_done.is_set():
+            return
+        self._backup_thread = threading.Thread(target=self._take_backup, name="surfvis-flag-backup", daemon=True)
+        self._backup_thread.start()
+
+    def _take_backup(self) -> None:
+        try:
+            # Microseconds, so two servers (or a quick restart) never collide.
+            stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S%f")
+            self.backup = save_flag_version(
+                self.ms, f"surfvis_before_{stamp}", "surfvis serve: FLAG before manual flagging"
+            )
+        except Exception as exc:  # noqa: BLE001 - reported through backup_state
+            self.backup_error = f"{type(exc).__name__}: {exc}"
+        finally:
+            self._backup_done.set()
+
+    def _require_backup(self) -> None:
+        if self.backup_state == "none":
+            self._take_backup()  # no background thread: take it now
+        if not self._backup_done.is_set():
+            raise BackupPendingError("The backup flag version is still being written; try again shortly")
+        if self.backup_error is not None:
+            raise RuntimeError(f"No backup flag version, so flagging is disabled: {self.backup_error}")
 
     def apply(
         self,
@@ -202,11 +254,14 @@ class Flagger:
         Raises:
             KeyError: if the baseline has no rows in the partition.
             ValueError: if the polygon is malformed or selects no cells.
+            BackupPendingError: if the backup flag version is still being written.
         """
         from surfvis.web import msdata
 
         if not corr_idx:
             raise ValueError("No correlations to flag")
+        if not dry_run:
+            self._require_backup()
         with self._lock:
             ds = msdata._open(self.ms, field_id, spw, scan)
             grid = msdata.ms_times(ds)
@@ -215,6 +270,8 @@ class Flagger:
             if not mask.any():
                 raise ValueError("The selection contains no cells")
 
+            # The rows the waterfall shows: the baseline in the order the MS stores it.
+            name1, name2 = msdata.stored_order(self.ms, field_id, spw, scan, name1, name2)
             rows, times = msdata.baseline_rows(self.ms, field_id, spw, scan, name1, name2)
             if rows.size == 0:
                 raise KeyError(f"No rows for {name1}-{name2} in field {field_id}, spw {spw}, scan {scan}")
@@ -242,36 +299,50 @@ class Flagger:
                 if dry_run:
                     return {"id": None, **summary}
 
-                if self.backup is None:
-                    stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S")
-                    self.backup = save_flag_version(
-                        self.ms, f"surfvis_before_{stamp}", "surfvis serve: FLAG before manual flagging"
-                    )
-                    summary["backup"] = self.backup
-
-                new = flag | cells
-                table.putcol("FLAG", new, index=(rows,))
-                table.putcol("FLAG_ROW", new.all(axis=(1, 2)), index=(rows,))
+                changed = cells & ~flag
+                new = flag | changed
+                # Only ever set: a row flagged through FLAG_ROW alone stays flagged.
+                new_row = flag_row | new.all(axis=(1, 2))
+                edit = Edit(
+                    id=self._next_id,
+                    rows=rows,
+                    corr_idx=list(corr_idx),
+                    changed=tuple(i.astype(np.int32) for i in np.nonzero(changed)),
+                    row_set=np.flatnonzero(new_row & ~flag_row),
+                    cells=summary["cells"],
+                    newly_flagged=summary["newly_flagged"],
+                    description=f"{name1}-{name2} field {field_id} spw {spw} scan {scan}",
+                )
+                try:
+                    table.putcol("FLAG", new, index=(rows,))
+                    table.putcol("FLAG_ROW", new_row, index=(rows,))
+                except Exception:
+                    # Put back what this edit wrote, so a half-written edit is not left behind unrecorded.
+                    try:
+                        table.putcol("FLAG", flag, index=(rows,))
+                        table.putcol("FLAG_ROW", flag_row, index=(rows,))
+                    except Exception:  # noqa: BLE001 - keep the edit so undo can still try
+                        self._record(edit)
+                    raise
             finally:
                 table.close()
-            msdata.invalidate(self.ms)
+                if not dry_run:
+                    msdata.invalidate(self.ms)
 
-            edit = Edit(
-                id=self._next_id,
-                rows=rows,
-                corr_idx=list(corr_idx),
-                flag=flag,
-                flag_row=flag_row,
-                cells=summary["cells"],
-                newly_flagged=summary["newly_flagged"],
-                description=f"{name1}-{name2} field {field_id} spw {spw} scan {scan}",
-            )
-            self._next_id += 1
-            self.edits.append(edit)
+            self._record(edit)
             return {"id": edit.id, **summary}
 
+    def _record(self, edit: Edit) -> None:
+        self._next_id += 1
+        self.edits.append(edit)
+
     def undo(self) -> Edit | None:
-        """Restore the cells the most recent edit changed. None if there is nothing to undo."""
+        """Clear the cells the most recent edit set. None if there is nothing to undo.
+
+        Reads the rows as they are now and clears only the recorded cells, so
+        flags written since by anything else survive. FLAG_ROW is recomputed
+        only for rows this edit flagged.
+        """
         import arcae
 
         from surfvis.web import msdata
@@ -279,12 +350,18 @@ class Flagger:
         with self._lock:
             if not self.edits:
                 return None
-            edit = self.edits.pop()
+            edit = self.edits[-1]
             table = arcae.table(self.ms, readonly=False)
             try:
-                table.putcol("FLAG", edit.flag, index=(edit.rows,))
-                table.putcol("FLAG_ROW", edit.flag_row, index=(edit.rows,))
+                flag = np.array(table.getcol("FLAG", index=(edit.rows,)), dtype=bool)
+                flag[edit.changed] = False
+                table.putcol("FLAG", flag, index=(edit.rows,))
+                if edit.row_set.size:
+                    flag_row = np.array(table.getcol("FLAG_ROW", index=(edit.rows,)), dtype=bool)
+                    flag_row[edit.row_set] = flag[edit.row_set].all(axis=(1, 2))
+                    table.putcol("FLAG_ROW", flag_row, index=(edit.rows,))
             finally:
                 table.close()
-            msdata.invalidate(self.ms)
+                msdata.invalidate(self.ms)
+            self.edits.pop()
             return edit

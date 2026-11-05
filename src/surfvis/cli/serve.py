@@ -50,7 +50,8 @@ def serve(
     allow_flagging: Annotated[
         bool,
         typer.Option(
-            help="Let the browser write FLAG. FLAG is saved as a CASA flag version before the first write.",
+            help="Let the browser write FLAG. FLAG is first saved as a CASA flag version, in the background "
+            "from startup; on a large MS this takes minutes, and writes wait for it.",
             rich_help_panel="Flagging",
         ),
     ] = False,

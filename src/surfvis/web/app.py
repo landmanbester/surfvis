@@ -16,7 +16,7 @@ from pydantic import BaseModel, Field
 from surfvis.utils import gains as gains_mod
 from surfvis.utils import products as products_mod
 from surfvis.web import msdata, planes, render
-from surfvis.web.flagging import Flagger
+from surfvis.web.flagging import BackupPendingError, Flagger
 from surfvis.web.store import Chi2Store, Selection
 
 HERE = Path(__file__).parent
@@ -468,6 +468,9 @@ def create_app(
         )
 
     flagger = Flagger(ms_path) if allow_flagging else None
+    if flagger is not None:
+        # Copying FLAG takes minutes on a large MS; do it now, not inside the first /flag request.
+        flagger.start_backup()
 
     def _flagger() -> Flagger:
         if flagger is None:
@@ -495,10 +498,14 @@ def create_app(
                 corr_idx,
                 dry_run=req.dry_run,
             )
+        except BackupPendingError as exc:
+            raise HTTPException(status_code=503, detail=str(exc), headers={"Retry-After": "10"}) from exc
         except (KeyError, IndexError, FileNotFoundError) as exc:
             raise HTTPException(status_code=404, detail=str(exc)) from exc
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
+        except RuntimeError as exc:
+            raise HTTPException(status_code=503, detail=str(exc)) from exc
 
     @app.post("/flag/undo")
     def flag_undo():
@@ -515,6 +522,8 @@ def create_app(
         return {
             "enabled": True,
             "backup": flagger.backup,
+            "backup_state": flagger.backup_state,
+            "backup_error": flagger.backup_error,
             "edits": [
                 {"id": e.id, "description": e.description, "cells": e.cells, "newly_flagged": e.newly_flagged}
                 for e in flagger.edits
