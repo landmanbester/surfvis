@@ -14,6 +14,7 @@ surfchi2 works on plottable.
 """
 
 import os
+import threading
 from dataclasses import dataclass, field, replace
 from functools import lru_cache
 
@@ -307,7 +308,10 @@ def ms_times(ds: xarray.Dataset) -> np.ndarray:
 def baseline_rows(ms: str, field: int, spw: int, scan: int, name1: str, name2: str) -> tuple[np.ndarray, np.ndarray]:
     """Main-table row numbers and TIME values (MJD seconds) of one baseline in one partition.
 
-    Either antenna order matches. Read with an arcae TaQL query, so the web
+    Only the given antenna order matches: pass the order the MS stores the
+    baseline in, as the waterfall shows it. A baseline stored both ways in one
+    partition is two baselines to xarray-ms, and flagging one must not touch
+    the other. Read with an arcae TaQL query, so the web
     layer needs no python-casacore. The row array is a writable copy: arcae
     rejects read-only buffers as row indices.
     """
@@ -323,7 +327,7 @@ def baseline_rows(ms: str, field: int, spw: int, scan: int, name1: str, name2: s
 
     sel = Table.from_taql(
         f"SELECT ROWID() AS ROW, TIME FROM '{ms}' WHERE FIELD_ID=={field} && DATA_DESC_ID=={spw} && "
-        f"SCAN_NUMBER=={scan} && ((ANTENNA1=={a} && ANTENNA2=={b}) || (ANTENNA1=={b} && ANTENNA2=={a}))"
+        f"SCAN_NUMBER=={scan} && ANTENNA1=={a} && ANTENNA2=={b}"
     )
     try:
         if not sel.nrow():
@@ -331,6 +335,21 @@ def baseline_rows(ms: str, field: int, spw: int, scan: int, name1: str, name2: s
         return np.array(sel.getcol("ROW"), dtype=np.int64), np.asarray(sel.getcol("TIME"), dtype=float)
     finally:
         sel.close()
+
+
+def stored_order(ms: str, field: int, spw: int, scan: int, name1: str, name2: str) -> tuple[str, str]:
+    """The baseline's antenna order as the MS stores it, which is the order its data is in.
+
+    Not xarray-ms's ``baseline_antenna1/2_name``: a baseline stored as (2, 0)
+    is labelled (0, 2) there while its data stays V_20, unconjugated. Gains,
+    cross-hand labels and flag rows must follow the data, so ask the MS. The
+    requested order wins if the MS holds both.
+    """
+    if baseline_rows(ms, field, spw, scan, name1, name2)[0].size:
+        return name1, name2
+    if baseline_rows(ms, field, spw, scan, name2, name1)[0].size:
+        return name2, name1
+    raise KeyError(f"No baseline {name1}-{name2} in field {field}, spw {spw}, scan {scan}")
 
 
 def slot_index(grid: np.ndarray, times: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
@@ -512,11 +531,10 @@ def waterfall(
             raise KeyError(f"Column {name!r} not in this Measurement Set. Have: {sorted(ds.data_vars)}")
 
     # Plot the baseline the way the MS stores it. The grid is symmetric, so a
-    # click can ask for (q, p); the row read is (p, q), and gains, cross-hand
-    # labels and the title must all follow the row, not the request.
+    # click can ask for (q, p); the data read is in the stored order, and
+    # gains, cross-hand labels and the title must all follow it.
     k = baseline_index(ds, name1, name2)
-    if str(ds.baseline_antenna1_name.values[k]) != name1:
-        name1, name2 = name2, name1
+    name1, name2 = stored_order(ms, field, spw, scan, name1, name2)
 
     labels_ = [str(p) for p in ds.polarization.values]
     gains = None
@@ -552,7 +570,7 @@ def waterfall(
         [product],
         read,
         vis,
-        np.ones(vis.shape),
+        None,  # unit weights; the waterfall plots values only
         flags,
         ant1,
         ant2,
@@ -610,21 +628,34 @@ def cached_plane(
     save memory: ``plane`` is complex64 and ``values`` is None, so use
     ``plane``; ``rect`` is None.
     """
-    return _cached_plane(
-        ms,
-        field,
-        spw,
-        scan,
-        name1,
-        name2,
-        product,
-        column,
-        model,
-        gtable,
-        flagversion,
-        _fingerprint(ms),
-        _gtable_stamp(gtable),
-    )
+    key = (ms, field, spw, scan, name1, name2, product, column, model, gtable, flagversion)
+    with _PLANE_LOCKS_GUARD:
+        if len(_PLANE_LOCKS) > 1024:  # one per plane ever asked for; drop the idle ones
+            for stale in [k for k, v in _PLANE_LOCKS.items() if not v.locked()]:
+                del _PLANE_LOCKS[stale]
+        lock = _PLANE_LOCKS.setdefault(key, threading.Lock())
+    # Concurrent misses for one plane wait for the first read instead of each
+    # reading the MS (lru_cache does not coalesce them).
+    with lock:
+        return _cached_plane(
+            ms,
+            field,
+            spw,
+            scan,
+            name1,
+            name2,
+            product,
+            column,
+            model,
+            gtable,
+            flagversion,
+            _fingerprint(ms),
+            _gtable_stamp(gtable),
+        )
+
+
+_PLANE_LOCKS: dict[tuple, threading.Lock] = {}
+_PLANE_LOCKS_GUARD = threading.Lock()
 
 
 @lru_cache(maxsize=4)
