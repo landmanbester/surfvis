@@ -35,6 +35,31 @@ def term_path(spec: str) -> str:
     return spec
 
 
+def find_terms(directory: str) -> list[str]:
+    """QuartiCal gain terms in the ``*.qc`` directories directly inside ``directory``.
+
+    A term is a subdirectory holding ``<term>_<n>`` groups, e.g. ``gains.qc/NET``.
+    """
+    found = []
+    try:
+        qcs = sorted(e.path for e in os.scandir(directory) if e.is_dir() and e.name.endswith(".qc"))
+    except OSError:
+        return []
+    for qc in qcs:
+        try:
+            terms = sorted((e for e in os.scandir(qc) if e.is_dir()), key=lambda e: e.name)
+        except OSError:
+            continue
+        for term in terms:
+            try:
+                names = os.listdir(term.path)
+            except OSError:
+                continue
+            if any(n.startswith(f"{term.name}_") and n.removeprefix(f"{term.name}_").isdigit() for n in names):
+                found.append(term.path)
+    return found
+
+
 def _datasets(path: str) -> tuple[xr.Dataset, ...]:
     if not os.path.isdir(path):
         raise FileNotFoundError(f"No gain term at {path}")

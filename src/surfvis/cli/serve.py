@@ -27,9 +27,21 @@ def serve(
             rich_help_panel="Inputs",
         ),
     ] = None,
+    gtable: Annotated[
+        list[str] | None,
+        typer.Option(
+            help="A gain term the waterfall may apply, e.g. gains.qc/NET. Repeatable. The term chi2 used, "
+            "and terms in *.qc directories next to the MS, are offered without it; no other path is opened.",
+            rich_help_panel="Inputs",
+        ),
+    ] = None,
     host: Annotated[
         str,
-        typer.Option(help="Interface to bind to.", rich_help_panel="Server"),
+        typer.Option(
+            help="Interface to bind to. The server has no authentication: 0.0.0.0 lets anyone who can reach "
+            "this host browse the Measurement Set.",
+            rich_help_panel="Server",
+        ),
     ] = "127.0.0.1",
     port: Annotated[
         int,
@@ -57,6 +69,29 @@ def serve(
             hint += " -- note xarray-ms needs Python 3.11 or newer"
         raise typer.BadParameter(f"The web interface needs the optional extras: {hint} ({exc})") from exc
 
-    app = create_app(data, ms)
     typer.echo(f"surfvis serving {data} on http://{host}:{port}")
-    uvicorn.run(app, host=host, port=port, reload=reload)
+    if host not in ("127.0.0.1", "localhost", "::1"):
+        typer.echo(
+            f"warning: listening on {host} without authentication; anyone who can reach it can use it.", err=True
+        )
+    if not reload:
+        uvicorn.run(create_app(data, ms, gtables=gtable), host=host, port=port)
+        return
+
+    # Reload re-imports the app in a worker process, so uvicorn needs an
+    # import string; the options travel through the environment.
+    import os
+
+    from surfvis.web import app as web_app
+
+    os.environ[web_app.ENV_DATA] = str(data)
+    os.environ[web_app.ENV_MS] = str(ms) if ms is not None else ""
+    os.environ[web_app.ENV_GTABLES] = os.pathsep.join(gtable or [])
+    uvicorn.run(
+        "surfvis.web.app:app_from_env",
+        factory=True,
+        host=host,
+        port=port,
+        reload=True,
+        reload_dirs=[str(Path(web_app.__file__).parent)],
+    )

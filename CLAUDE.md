@@ -49,7 +49,7 @@ docker run --rm --user "$(id -u):$(id -g)" -e HOME=/tmp -v "$PWD":/src -w /src \
    PYTHONPATH=/tmp/t:/src/src:/src /tmp/t/bin/pytest tests/ -q -W ignore"
 ```
 
-That is the only way to run the full suite (54 tests). **CI does not run them** —
+That is the only way to run the full suite (65 tests). **CI does not run them** —
 `.github/workflows/ci.yml` installs the lightweight package only, deliberately,
 since python-casacore and numba make CI slow and brittle. Verify locally.
 
@@ -181,6 +181,11 @@ the MSv4 view unless `FEED` (validated against ANTENNA1/2), `STATE`, and the
 `FIELD` direction columns are populated. `tests/fixtures/ms.py` does this.
 
 **`--dataout` and `--imagesout` are deleted and recreated** on every `chi2` run.
+
+**`serve` opens only the gain tables it offers.** It has no authentication,
+so `gtable` in a query string must not name arbitrary paths: the term `chi2`
+used, `serve --gtable` ones, and `*.qc` terms next to the MS. Keep any new
+path-valued query parameter on an allow-list the same way.
 
 **`serve` carries no `@stimela_cab`** and must not. A long-running GUI is not a
 batch task. `generate-cabs` skips undecorated functions, which is what keeps
