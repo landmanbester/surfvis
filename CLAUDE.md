@@ -48,7 +48,7 @@ docker run --rm --user "$(id -u):$(id -g)" -e HOME=/tmp -v "$PWD":/src -w /src \
    PYTHONPATH=/tmp/t:/src/src:/src /tmp/t/bin/pytest tests/ -q -W ignore"
 ```
 
-That is the only way to run the full suite (16 tests). **CI does not run them** —
+That is the only way to run the full suite (19 tests). **CI does not run them** —
 `.github/workflows/ci.yml` installs the lightweight package only, deliberately,
 since python-casacore and numba make CI slow and brittle. Verify locally.
 
@@ -129,7 +129,7 @@ build its view without them. Keep them when editing the fixture.
 
 **A green test run proves less than it looks.** The heavy module skips at
 *import*, so pytest reports one skip for the whole file: a lightweight run says
-"9 passed, 1 skipped" while 7 tests did not run.
+"9 passed, 1 skipped" while 10 tests did not run.
 `tests/test_suite_integrity.py` pins the per-module test counts statically so a
 deletion fails loudly; update those counts deliberately when adding or removing
 a test.

@@ -3,7 +3,7 @@
 Everything touching a Measurement Set needs the ``[full]`` extras. Without
 them ``test_commands.py`` skips at *import*, which pytest reports as a single
 skip for the whole module -- a lightweight run says "9 passed, 1 skipped",
-not the 5 tests that did not run. CI installs the lightweight package by
+not the 10 tests that did not run. CI installs the lightweight package by
 design, so a green CI run proves less than it looks, and tests could be
 deleted or quietly defanged without anything noticing.
 
@@ -21,7 +21,7 @@ MARKERS = {"needs_ms"}
 
 # module -> (total test functions, of which need a Measurement Set)
 EXPECTED = {
-    "test_commands.py": (7, 7),
+    "test_commands.py": (10, 10),
     "test_install.py": (2, 0),
     "test_roundtrip.py": (4, 0),
     "test_suite_integrity.py": (3, 0),

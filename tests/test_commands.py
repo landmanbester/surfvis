@@ -44,6 +44,26 @@ def test_surf_writes_one_png_per_baseline(tiny_ms, tmp_path):
 
 
 @needs_ms
+def test_surf_defaults_to_the_working_directory(tiny_ms, tmp_path, monkeypatch):
+    """Without --opdir the plots land in the working directory, not beside the MS.
+
+    In a container, or under Stimela, only the working directory is reliably writable.
+    """
+    from pathlib import Path
+
+    from surfvis.core.surf import surf
+
+    cwd = tmp_path / "work"
+    cwd.mkdir()
+    monkeypatch.chdir(cwd)
+    surf(tiny_ms["path"], datacolumn="DATA", i=0, j=1)
+
+    name = Path(tiny_ms["path"].rstrip("/")).name
+    assert len(list((cwd / f"{name}_DATA__plots").glob("*.png"))) == 1
+    assert not Path(f"{tiny_ms['path'].rstrip('/')}_DATA__plots").exists()
+
+
+@needs_ms
 def test_surf_rejects_an_unknown_quantity(tiny_ms, tmp_path):
     """Stimela calls the core function directly, so it validates for itself."""
     from surfvis.core.surf import surf
@@ -101,6 +121,48 @@ def test_flag_chi2_respects_protected_antennas(tiny_ms, tmp_path):
 
     touching = (ant1 == p) | (ant2 == p)
     assert not after[touching].any(), "protected antenna's baselines must be untouched"
+
+
+@needs_ms
+def test_flag_chi2_only_adds_to_flag_row(tiny_ms, tmp_path):
+    """A row flagged beforehand stays flagged, however clean its visibilities look."""
+    from casacore.tables import table
+
+    from surfvis.core.flag_chi2 import flag_chi2
+
+    ms = tmp_path / "flagrow.ms"
+    shutil.copytree(tiny_ms["path"], ms)
+    with table(str(ms), readonly=False, ack=False) as t:
+        flag_row = t.getcol("FLAG_ROW")
+        flag_row[::7] = True
+        t.putcol("FLAG_ROW", flag_row)
+
+    # A threshold nothing reaches, so no row ends up fully flagged by FLAG.
+    flag_chi2(ms, rcol="RESIDUAL", flag_above=1e12, nthreads=1)
+
+    with table(str(ms), readonly=True, ack=False) as t:
+        np.testing.assert_array_equal(t.getcol("FLAG_ROW"), flag_row)
+
+
+@needs_ms
+def test_flag_chi2_kernel_skips_autocorrelations_and_flags_non_finite():
+    """Autocorrelations are left alone; a NaN or infinite chi-squared is flagged."""
+    from surfvis.utils.chisq import _flagchisq
+
+    resid = np.ones((4, 3, 2), np.complex64)
+    weight = np.ones((4, 3, 2), np.float32)
+    resid[0] = 100.0  # an autocorrelation, far above the threshold
+    resid[1, 0, 0] = np.nan
+    weight[2, 1, 1] = np.inf
+    ant1 = np.array([0, 0, 0, 1])
+    ant2 = np.array([0, 1, 2, 2])
+
+    flag = _flagchisq(resid, weight, np.zeros(resid.shape, bool), ant1, ant2, (0, 1), 5.0, (-1,))
+
+    assert not flag[0].any(), "autocorrelation flagged"
+    assert flag[1, 0].all() and not flag[1, 1:].any(), "NaN residual not flagged"
+    assert flag[2, 1].all() and not flag[2, [0, 2]].any(), "infinite weight not flagged"
+    assert not flag[3].any()
 
 
 @needs_ms
