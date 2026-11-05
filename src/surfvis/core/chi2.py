@@ -54,6 +54,17 @@ def chi2(
         nfreqs: Number of frequencies in a chunk. ``-1`` means all of them.
         use_corrs: Correlations to use. Defaults to the diagonal correlations.
         stokes: Stokes parameters to compute as well, e.g. ``["I", "V"]``.
+
+    Raises:
+        ValueError: if ``dataout`` or ``imagesout`` exists but does not look
+            like an earlier output of this command, which would otherwise be
+            deleted.
+
+    Note:
+        The worker pool uses the spawn start method, which re-imports
+        ``__main__``. A script calling this function must do so under
+        ``if __name__ == "__main__":``, or the pool breaks
+        (``BrokenProcessPool``). The CLI is unaffected.
     """
     from multiprocessing.pool import ThreadPool
 
@@ -61,14 +72,10 @@ def chi2(
     gtable = str(gtable) if gtable is not None else None
 
     dataout = Path(str(dataout)) if dataout is not None else Path(os.getcwd()) / "chi2.zarr"
-    if dataout.is_dir():
-        print(f"Removing existing {dataout} folder")
-        shutil.rmtree(dataout)
-
     imagesout = Path(str(imagesout)) if imagesout is not None else Path(os.getcwd()) / "chi2"
-    if imagesout.is_dir():
-        print(f"Removing existing {imagesout} folder")
-        shutil.rmtree(imagesout)
+    # Refuse before any work, so a typo costs nothing.
+    for path, allowed in ((dataout, _ZARR_ENTRIES), (imagesout, ())):
+        _check_replaceable(path, allowed)
 
     dask.config.set(pool=ThreadPool(nthreads))
 
@@ -173,6 +180,13 @@ def chi2(
     read = products_mod.needed(products, labels, full_jones=full_jones)
     read_idx = [labels.index(c) for c in read]
     nprod = len(products)
+
+    # Only now, with the products, correlations and gains all validated: a run
+    # that was going to fail must leave the previous outputs alone.
+    for path in (dataout, imagesout):
+        if path.is_dir():
+            print(f"Removing existing {path} folder")
+            shutil.rmtree(path)
 
     # Per-chunk cubes, so the zarr keeps what the PNGs throw away.
     cubes = {}
@@ -289,6 +303,34 @@ def chi2(
             chi2_dof = np.full_like(val, np.nan)
             chi2_dof[count > 0] = val[count > 0] / count[count > 0]
             makeplot(chi2_dof, basename + name, title)
+
+
+# What a chi2 zarr holds at its top level: zarr v2 or v3 metadata and the field groups.
+_ZARR_ENTRIES = ("zarr.json", ".zgroup", ".zattrs", ".zmetadata")
+
+
+def _check_replaceable(path: Path, metadata: tuple[str, ...]) -> None:
+    """Raise unless ``path`` is absent or looks like an output this command wrote.
+
+    Outputs are deleted and recreated on every run, so a mistyped path (``.``,
+    an MS, a data folder) must be refused rather than removed. An earlier
+    output holds only ``field<N>`` directories, plus zarr metadata for the
+    dataset.
+    """
+    if not path.exists():
+        return
+    if not path.is_dir():
+        raise ValueError(f"{path} exists and is not a directory; refusing to replace it")
+    strays = [
+        e.name
+        for e in path.iterdir()
+        if e.name not in metadata and not (e.is_dir() and e.name[5:].isdigit() and e.name.startswith("field"))
+    ]
+    if strays:
+        raise ValueError(
+            f"{path} does not look like an earlier surfvis chi2 output (it holds {sorted(strays)[:5]}); "
+            "refusing to delete it. Remove it yourself or choose another path."
+        )
 
 
 def _spectral_setup(msname: str) -> tuple[dict[int, np.ndarray], dict[int, list[int]]]:

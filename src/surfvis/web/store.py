@@ -58,8 +58,13 @@ class Chi2Store:
         if hit.size == 0:
             raise KeyError(f"No product {sel.product!r}; have {list(ds['product'].values)}")
         k = int(hit[0])
-        chi2 = ds.chi2.values[sel.time_bin, sel.freq_bin, k]
-        counts = ds.counts.values[sel.time_bin, sel.freq_bin, k]
+        if not (0 <= sel.time_bin < ds.sizes["time_bin"] and 0 <= sel.freq_bin < ds.sizes["freq_bin"]):
+            raise IndexError(f"No bin ({sel.time_bin}, {sel.freq_bin}) in scan {sel.scan}")
+        # Index before reading: .values on the whole variable would load every
+        # bin of the scan, which with --ntimes 1 on a long scan is gigabytes.
+        idx = {"time_bin": sel.time_bin, "freq_bin": sel.freq_bin, "product": k}
+        chi2 = ds.chi2.isel(idx).values
+        counts = ds.counts.isel(idx).values
 
         with np.errstate(invalid="ignore", divide="ignore"):
             chi2_dof = np.where(counts > 0, chi2 / np.where(counts > 0, counts, 1), np.nan)
@@ -77,6 +82,10 @@ class Chi2Store:
             mcol=str(ds.attrs.get("mcol", "")),
             gtable=str(ds.attrs.get("gtable", "")),
         )
+
+    def chunk_attrs(self, field: int, spw: int, scan: int) -> dict:
+        """The attributes ``chi2`` recorded on a (field, spw, scan) group."""
+        return dict(self.group(field, spw, scan).attrs)
 
     def bins(self, field: int, spw: int, scan: int) -> tuple[list[int], list[int], list[str]]:
         """Available (time bins, freq bins, products) for a scan."""
@@ -124,8 +133,9 @@ def _open_group(path: str, field: int, spw: int, scan: int) -> xr.Dataset:
     # chunks=None reads eagerly into numpy. Without it xarray returns
     # dask-backed arrays, which would make dask a hard requirement of the web
     # extra for no benefit -- a single chunk's matrix is a few hundred KB and
-    # every consumer here calls .values immediately.
-    return xr.open_zarr(path, group=f"field{field}/spw{spw}/scan{scan}", chunks=None)
+    # every consumer here calls .values immediately. cache=False keeps xarray
+    # from holding a whole variable in memory once any slice of it is read.
+    return xr.open_dataset(path, engine="zarr", group=f"field{field}/spw{spw}/scan{scan}", chunks=None, cache=False)
 
 
 def _discover_scans(path: Path) -> list[tuple[int, int, int]]:

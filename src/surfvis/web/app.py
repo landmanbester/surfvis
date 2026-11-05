@@ -1,6 +1,7 @@
 """FastAPI application wiring the chi-squared store to waterfall plots."""
 
 import hashlib
+import os
 from pathlib import Path
 from typing import Literal
 from urllib.parse import urlencode
@@ -12,12 +13,18 @@ from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from pydantic import BaseModel, Field
 
+from surfvis.utils import gains as gains_mod
 from surfvis.utils import products as products_mod
 from surfvis.web import msdata, planes, render
 from surfvis.web.flagging import Flagger
 from surfvis.web.store import Chi2Store, Selection
 
 HERE = Path(__file__).parent
+
+# How `surfvis serve --reload` hands its options to the worker uvicorn
+# re-imports: reload needs an import string, not an app object.
+ENV_DATA, ENV_MS, ENV_GTABLES = "SURFVIS_SERVE_DATA", "SURFVIS_SERVE_MS", "SURFVIS_SERVE_GTABLES"
+ENV_FLAGGING = "SURFVIS_SERVE_ALLOW_FLAGGING"
 
 
 class FlagRequest(BaseModel):
@@ -26,8 +33,9 @@ class FlagRequest(BaseModel):
     field: int
     spw: int
     scan: int
-    p: int
-    q: int
+    # Non-negative: a negative index would wrap and flag another baseline.
+    p: int = Field(ge=0)
+    q: int = Field(ge=0)
     product: str
     vertices: list[tuple[float, float]] = Field(min_length=3)
     # "product": the correlations the plotted product is formed from; "all": every correlation.
@@ -48,13 +56,33 @@ class RevalidatedStaticFiles(StaticFiles):
         return response
 
 
-def create_app(data: str | Path, ms: str | Path | None = None, allow_flagging: bool = False) -> FastAPI:
+def app_from_env() -> FastAPI:
+    """The app :func:`create_app` builds, configured from the environment."""
+    gtables = [g for g in os.environ.get(ENV_GTABLES, "").split(os.pathsep) if g]
+    return create_app(
+        os.environ[ENV_DATA],
+        os.environ.get(ENV_MS) or None,
+        gtables=gtables,
+        allow_flagging=bool(os.environ.get(ENV_FLAGGING)),
+    )
+
+
+def create_app(
+    data: str | Path,
+    ms: str | Path | None = None,
+    gtables: list[str] | None = None,
+    allow_flagging: bool = False,
+) -> FastAPI:
     """Build the app around one chi-squared dataset.
 
     Args:
         data: Path to the zarr written by ``surfvis chi2 --dataout``.
         ms: Measurement Set to read waterfalls from. Defaults to the path
             recorded in the dataset, which is right unless it has moved.
+        gtables: Gain terms the waterfall may apply, besides the one ``chi2``
+            used and any found in ``*.qc`` directories next to the MS. No
+            other path is opened: the server has no authentication, so a
+            query string must not be able to name arbitrary directories.
         allow_flagging: Enable the routes that write FLAG. Off by default:
             the browser is read-only unless asked otherwise.
 
@@ -73,6 +101,19 @@ def create_app(data: str | Path, ms: str | Path | None = None, allow_flagging: b
     first = store.scans[0]
     ms_path = str(ms) if ms is not None else store.chunk(Selection(*first, 0, 0, store.bins(*first)[2][0])).ms
 
+    recorded = sorted({store.chunk_attrs(*key).get("gtable", "") for key in store.scans} - {""})
+
+    def _gain_tables() -> dict[str, str]:
+        """Offered gain terms, as {real path: spelling shown}. Re-scanned per request, so new solves appear."""
+        listed = list(recorded) + list(gtables or []) + gains_mod.find_terms(str(Path(ms_path).resolve().parent))
+        offered = {}
+        for spec in listed:
+            offered.setdefault(os.path.realpath(gains_mod.term_path(spec)), spec)
+        return offered
+
+    def _allowed(gtable: str) -> bool:
+        return not gtable or os.path.realpath(gains_mod.term_path(gtable)) in _gain_tables()
+
     def _selection(field, spw, scan, t, f, c) -> Selection:
         return Selection(field=field, spw=spw, scan=scan, time_bin=t, freq_bin=f, product=c)
 
@@ -82,47 +123,59 @@ def create_app(data: str | Path, ms: str | Path | None = None, allow_flagging: b
         except (KeyError, IndexError, ValueError) as exc:
             raise HTTPException(status_code=404, detail=f"No such chunk: {exc}") from exc
 
+    def _baseline(chunk, p, q) -> tuple[str, str]:
+        names = chunk.antenna_names
+        if not (p < len(names) and q < len(names)):
+            raise HTTPException(status_code=404, detail=f"No antenna pair ({p}, {q}); there are {len(names)} antennas")
+        return names[p], names[q]
+
+    def _selectors(request, field, spw, scan, t=0, f=0, c="", scale="log"):
+        times, freqs, corrs = store.bins(field, spw, scan)
+        return {
+            "store": store,
+            "field_names": msdata.field_names(ms_path),
+            "field": field,
+            "spw": spw,
+            "scan": scan,
+            "times": times,
+            "freqs": freqs,
+            "corrs": corrs,
+            # Keep the bin, product and scale across a change of scan where they still exist.
+            "t": t if t in times else times[0],
+            "f": f if f in freqs else freqs[0],
+            "c": c if c in corrs else corrs[0],
+            "scale": scale if scale in render.SCALES else "log",
+        }
+
     @app.get("/", response_class=HTMLResponse)
     def index(request: Request):
         field, spw, scan = store.scans[0]
-        times, freqs, corrs = store.bins(field, spw, scan)
         return templates.TemplateResponse(
-            request,
-            "index.html",
-            {
-                "store": store,
-                "ms": ms_path,
-                "field_names": msdata.field_names(ms_path),
-                "field": field,
-                "spw": spw,
-                "scan": scan,
-                "times": times,
-                "freqs": freqs,
-                "corrs": corrs,
-            },
+            request, "index.html", {"ms": ms_path, **_selectors(request, field, spw, scan)}
         )
 
     @app.get("/scans", response_class=HTMLResponse)
-    def scans(request: Request, field: int = Query(...), spw: int = Query(...)):
-        """Re-render the scan/bin selectors when field or spw changes."""
+    def scans(
+        request: Request,
+        field: int = Query(...),
+        spw: int = Query(...),
+        scan: int | None = Query(None),
+        t: int = Query(0),
+        f: int = Query(0),
+        c: str = Query(""),
+        scale: str = Query("log"),
+    ):
+        """Re-render the selectors when field, spw or scan changes: each scan has its own bins."""
+        if field not in store.fields:
+            raise HTTPException(status_code=404, detail=f"No field {field}")
         spws = store.spws(field)
         if spw not in spws:
             spw = spws[0]
-        scan = store.scan_numbers(field, spw)[0]
-        times, freqs, corrs = store.bins(field, spw, scan)
+        numbers = store.scan_numbers(field, spw)
+        if scan not in numbers:
+            scan = numbers[0]
         return templates.TemplateResponse(
-            request,
-            "_selectors.html",
-            {
-                "store": store,
-                "field_names": msdata.field_names(ms_path),
-                "field": field,
-                "spw": spw,
-                "scan": scan,
-                "times": times,
-                "freqs": freqs,
-                "corrs": corrs,
-            },
+            request, "_selectors.html", _selectors(request, field, spw, scan, t, f, c, scale)
         )
 
     @app.get("/heatmap", response_class=HTMLResponse)
@@ -131,8 +184,8 @@ def create_app(data: str | Path, ms: str | Path | None = None, allow_flagging: b
         field: int = Query(...),
         spw: int = Query(...),
         scan: int = Query(...),
-        t: int = Query(0),
-        f: int = Query(0),
+        t: int = Query(0, ge=0),
+        f: int = Query(0, ge=0),
         c: str = Query(...),
         scale: str = Query("log"),
     ):
@@ -177,13 +230,16 @@ def create_app(data: str | Path, ms: str | Path | None = None, allow_flagging: b
         field: int = Query(...),
         spw: int = Query(...),
         scan: int = Query(...),
-        t: int = Query(0),
-        f: int = Query(0),
+        t: int = Query(0, ge=0),
+        f: int = Query(0, ge=0),
         c: str = Query(...),
         scale: str = Query("log"),
     ):
         chunk = _chunk(field, spw, scan, t, f, c)
-        norm, _, _ = render.make_norm(chunk.chi2_dof, scale)
+        try:
+            norm, _, _ = render.make_norm(chunk.chi2_dof, scale)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
         png = render.histogram_png(chunk.chi2_dof, norm)
         return Response(png, media_type="image/png")
 
@@ -217,11 +273,11 @@ def create_app(data: str | Path, ms: str | Path | None = None, allow_flagging: b
         field: int = Query(...),
         spw: int = Query(...),
         scan: int = Query(...),
-        t: int = Query(...),
-        f: int = Query(...),
+        t: int = Query(..., ge=0),
+        f: int = Query(..., ge=0),
         c: str = Query(...),
-        p: int = Query(...),
-        q: int = Query(...),
+        p: int = Query(..., ge=0),
+        q: int = Query(..., ge=0),
         product: str = Query(""),
         column: str = Query(""),
         model: str | None = Query(None),
@@ -236,20 +292,27 @@ def create_app(data: str | Path, ms: str | Path | None = None, allow_flagging: b
         quantity.
         """
         chunk = _chunk(field, spw, scan, t, f, c)
-        names = chunk.antenna_names
+        name1, name2 = _baseline(chunk, p, q)
         settings = _waterfall_settings(chunk, product, column, model, gtable, flagversion, quantity)
         base = {"field": field, "spw": spw, "scan": scan, "t": t, "f": f, "c": c, "p": p, "q": q}
-        problems = msdata.check(
-            ms_path,
-            field,
-            spw,
-            scan,
-            settings["product"],
-            settings["column"],
-            model=settings["model"],
-            gtable=settings["gtable"],
-            flagversion=settings["flagversion"],
-        )
+        offered = _gain_tables()
+        if not _allowed(settings["gtable"]):
+            problems = [
+                f"gain table {settings['gtable']!r} is not one this server offers; "
+                "pass it to surfvis serve with --gtable, or put it in a *.qc directory next to the MS"
+            ]
+        else:
+            problems = msdata.check(
+                ms_path,
+                field,
+                spw,
+                scan,
+                settings["product"],
+                settings["column"],
+                model=settings["model"],
+                gtable=settings["gtable"],
+                flagversion=settings["flagversion"],
+            )
         defaults = _waterfall_settings(chunk, "", "", None, None, "", "amp")
         # Controls the user moved off the heatmap's setting. Clicking another
         # cell sends these along, so a choice survives a change of baseline.
@@ -260,8 +323,9 @@ def create_app(data: str | Path, ms: str | Path | None = None, allow_flagging: b
             {
                 "base": base,
                 "query": urlencode({**base, **settings}),
-                "name1": names[p],
-                "name2": names[q],
+                "name1": name1,
+                "name2": name2,
+                "gtables": list(offered.values()),
                 "value": float(chunk.chi2_dof[p, q]),
                 # The column is corrected and has a model subtracted, so only
                 # visibility-like columns make sense; WEIGHT does not.
@@ -287,11 +351,11 @@ def create_app(data: str | Path, ms: str | Path | None = None, allow_flagging: b
         field: int = Query(...),
         spw: int = Query(...),
         scan: int = Query(...),
-        t: int = Query(...),
-        f: int = Query(...),
+        t: int = Query(..., ge=0),
+        f: int = Query(..., ge=0),
         c: str = Query(...),
-        p: int = Query(...),
-        q: int = Query(...),
+        p: int = Query(..., ge=0),
+        q: int = Query(..., ge=0),
         product: str = Query(""),
         column: str = Query(""),
         model: str | None = Query(None),
@@ -300,16 +364,18 @@ def create_app(data: str | Path, ms: str | Path | None = None, allow_flagging: b
         quantity: str = Query("amp"),
     ):
         chunk = _chunk(field, spw, scan, t, f, c)
-        names = chunk.antenna_names
+        name1, name2 = _baseline(chunk, p, q)
         settings = _waterfall_settings(chunk, product, column, model, gtable, flagversion, quantity)
+        if not _allowed(settings["gtable"]):
+            raise HTTPException(status_code=403, detail="That gain table is not one this server offers.")
         try:
             wf = msdata.waterfall(
                 ms_path,
                 field=field,
                 spw=spw,
                 scan=scan,
-                name1=names[p],
-                name2=names[q],
+                name1=name1,
+                name2=name2,
                 rect=(chunk.t0, chunk.tf, chunk.chan0, chunk.chanf),
                 **settings,
             )
@@ -322,11 +388,11 @@ def create_app(data: str | Path, ms: str | Path | None = None, allow_flagging: b
         field: int = Query(...),
         spw: int = Query(...),
         scan: int = Query(...),
-        t: int = Query(...),
-        f: int = Query(...),
+        t: int = Query(..., ge=0),
+        f: int = Query(..., ge=0),
         c: str = Query(...),
-        p: int = Query(...),
-        q: int = Query(...),
+        p: int = Query(..., ge=0),
+        q: int = Query(..., ge=0),
         product: str = Query(""),
         column: str = Query(""),
         model: str | None = Query(None),
@@ -345,17 +411,19 @@ def create_app(data: str | Path, ms: str | Path | None = None, allow_flagging: b
         if quantity not in msdata.QUANTITIES:
             raise HTTPException(status_code=400, detail=f"quantity must be one of {msdata.QUANTITIES}")
         chunk = _chunk(field, spw, scan, t, f, c)
-        names = chunk.antenna_names
+        name1, name2 = _baseline(chunk, p, q)
         settings = _waterfall_settings(chunk, product, column, model, gtable, flagversion, quantity)
         settings.pop("quantity")
+        if not _allowed(settings["gtable"]):
+            raise HTTPException(status_code=403, detail="That gain table is not one this server offers.")
         try:
             wf = msdata.cached_plane(
                 ms_path,
                 field,
                 spw,
                 scan,
-                names[p],
-                names[q],
+                name1,
+                name2,
                 **settings,
             )
         except (KeyError, IndexError, ValueError, FileNotFoundError) as exc:

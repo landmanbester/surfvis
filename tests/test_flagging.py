@@ -166,6 +166,9 @@ def test_flag_routes(chi2_zarr, writable_ms):
     assert client.post("/flag/undo").status_code == 409
 
     assert client.post("/flag", json={**body, "vertices": [(0, 0), (1, 1)]}).status_code == 422
+    # A negative antenna index must not wrap round to another baseline.
+    assert client.post("/flag", json={**body, "p": -1}).status_code == 422
+    assert client.post("/flag", json={**body, "p": 99}).status_code == 404
     assert client.post("/flag", json={**body, "vertices": _rect(50, 60, 0, 3)}).status_code == 400
     # Linear feeds cannot form RR.
     assert client.post("/flag", json={**body, "product": "RR"}).status_code == 400

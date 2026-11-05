@@ -93,6 +93,26 @@ def test_waterfall_accepts_either_antenna_order(chi2_zarr):
 
 
 @needs_web
+@pytest.mark.parametrize("product", ["XX", "XY", "V"])
+def test_reversed_cell_applies_the_gains_to_the_stored_baseline(chi2_zarr, gain_table, product):
+    """A lower-triangle cell asks for (q, p); gains, cross-hands and title must follow the MS's (p, q) row.
+
+    The gains were applied in the requested order to the stored row, which
+    corrupted half the grid's waterfalls whenever a gain table was in play.
+    """
+    from surfvis.web import msdata
+
+    ms = chi2_zarr["ms"]["path"]
+    names = chi2_zarr["ms"]["antenna_names"]
+    kw = {"column": "DATA", "model": "MODEL_DATA", "gtable": gain_table}
+    for quantity in ("real", "imag"):
+        forward = msdata.waterfall(ms, 0, 0, 1, names[2], names[6], product, quantity=quantity, **kw)
+        reverse = msdata.waterfall(ms, 0, 0, 1, names[6], names[2], product, quantity=quantity, **kw)
+        np.testing.assert_array_equal(reverse.values, forward.values)
+    assert (reverse.antenna1, reverse.antenna2) == (names[2], names[6])
+
+
+@needs_web
 def test_waterfall_carries_the_baseline_length(chi2_zarr):
     """The title's baseline length is the distance between ANTENNA::POSITION rows."""
     from casacore.tables import table
@@ -247,6 +267,107 @@ def test_routes(chi2_zarr):
     assert client.get("/heatmap?field=0&spw=0&scan=99&t=0&f=0&c=XX").status_code == 404
     assert client.get("/heatmap?field=0&spw=0&scan=1&t=0&f=0&c=XX&scale=nope").status_code == 400
 
+    # Bad indices are client errors, never a 500 and never a silent wrap to the end.
+    assert client.get("/heatmap?field=0&spw=0&scan=1&t=99&f=0&c=XX").status_code == 404
+    assert client.get("/heatmap?field=0&spw=0&scan=1&t=-1&f=0&c=XX").status_code == 422
+    assert client.get("/histogram.png?field=0&spw=0&scan=1&t=0&f=0&c=XX&scale=nope").status_code == 400
+    waterfall = "/waterfall?field=0&spw=0&scan=1&t=0&f=0&c=XX"
+    assert client.get(waterfall + "&p=99&q=1").status_code == 404
+    assert client.get(waterfall + "&p=-1&q=1").status_code == 422
+    assert client.get(waterfall.replace("/waterfall?", "/waterfall.png?") + "&p=1&q=99").status_code == 404
+
+    # The heatmap loads once; plots are fetched by app.js, so failures are read from the one response.
+    assert index.text.count('hx-get="/heatmap"') == 1 and 'hx-trigger="load"' not in index.text
+    assert 'data-plot="/histogram.png?' in heatmap.text and 'src="/histogram.png' not in heatmap.text
+    # Cells share one sync scope: a new click aborts the last waterfall request.
+    assert '<div class="grid" hx-sync="this:replace">' in heatmap.text
+
+
+@needs_web
+def test_changing_scan_refreshes_the_bins(chi2_zarr):
+    """Each scan has its own time and frequency bins, so the scan select re-renders the selectors."""
+    pytest.importorskip("httpx2")
+    from fastapi.testclient import TestClient
+
+    from surfvis.web.app import create_app
+
+    client = TestClient(create_app(chi2_zarr["zarr"]))
+    assert '<select name="scan"\n            hx-get="/scans"' in client.get("/").text
+
+    page = client.get("/scans?field=0&spw=0&scan=2&t=1&f=1&c=YY&scale=robust").text
+    assert '<option value="2" selected>2</option>' in page
+    for name, value in (("t", 1), ("f", 1)):
+        menu = page.split(f'name="{name}"')[1].split("</select>")[0]
+        assert f'<option value="{value}" selected>' in menu
+    assert '<option value="YY" selected>' in page and '<option value="robust" selected>' in page
+
+    # A bin the scan does not have falls back to the first, rather than 404ing the heatmap.
+    menu = client.get("/scans?field=0&spw=0&scan=2&t=99").text.split('name="t"')[1].split("</select>")[0]
+    assert '<option value="0" selected>' in menu
+    assert client.get("/scans?field=7&spw=0").status_code == 404
+
+
+@needs_web
+def test_only_offered_gain_tables_are_opened(chi2_zarr, gain_table, tmp_path):
+    """The query string cannot name an arbitrary path; the server has no authentication."""
+    pytest.importorskip("httpx2")
+    import shutil
+    from pathlib import Path
+
+    from fastapi.testclient import TestClient
+
+    from surfvis.web.app import create_app
+
+    query = "field=0&spw=0&scan=1&t=0&f=0&c=XX&p=1&q=5&column=RESIDUAL"
+
+    # chi2_zarr was made without gains, and gain_table is not next to its MS.
+    client = TestClient(create_app(chi2_zarr["zarr"]))
+    for path in (gain_table, "/etc", "/nowhere/NET"):
+        panel = client.get(f"/waterfall?{query}&gtable={path}").text
+        assert "not one this server offers" in panel and "waterfall.bin?" not in panel
+        assert "holds no" not in panel and "No gain term" not in panel
+    assert client.get(f"/waterfall.png?{query}&gtable={gain_table}").status_code == 403
+    assert client.get(f"/waterfall.bin?{query}&gtable={gain_table}").status_code == 403
+
+    # Passed to serve --gtable: offered, and applied.
+    given = TestClient(create_app(chi2_zarr["zarr"], gtables=[gain_table]))
+    panel = given.get(f"/waterfall?{query}").text
+    assert f'<option value="{gain_table}"' in panel
+    assert given.get(f"/waterfall.png?{query}&gtable={gain_table}").status_code == 200
+
+    # Found in a *.qc directory next to the MS: offered without being named.
+    ms = tmp_path / "moved.ms"
+    shutil.copytree(chi2_zarr["ms"]["path"], ms)
+    shutil.copytree(Path(gain_table).parent, tmp_path / "solve.qc")
+    nearby = TestClient(create_app(chi2_zarr["zarr"], ms=ms))
+    assert f'<option value="{tmp_path}/solve.qc/NET"' in nearby.get(f"/waterfall?{query}").text
+    assert nearby.get(f"/waterfall.png?{query}&gtable={tmp_path}/solve.qc/NET").status_code == 200
+
+
+@needs_web
+def test_reload_builds_the_app_from_the_environment(chi2_zarr, monkeypatch):
+    """serve --reload hands uvicorn an import string, so the options travel in the environment."""
+    from surfvis.web import app as web_app
+
+    monkeypatch.setenv(web_app.ENV_DATA, str(chi2_zarr["zarr"]))
+    monkeypatch.setenv(web_app.ENV_MS, "")
+    monkeypatch.setenv(web_app.ENV_GTABLES, "")
+    assert web_app.app_from_env().title == "surfvis"
+
+
+@needs_web
+def test_a_chunk_reads_only_its_own_matrix(chi2_zarr):
+    """Reading one bin must not pull, or cache, the whole scan's cube."""
+    from surfvis.web.store import Chi2Store, Selection
+
+    store = Chi2Store(chi2_zarr["zarr"])
+    store.chunk(Selection(0, 0, 1, 0, 0, "XX"))
+    ds = store.group(0, 0, 1)
+    assert type(ds.chi2.variable._data).__name__ != "MemoryCachedArray"
+    assert not isinstance(ds.chi2.variable._data, np.ndarray)
+    with pytest.raises(IndexError):
+        store.chunk(Selection(0, 0, 1, -1, 0, "XX"))
+
 
 @needs_web
 def test_waterfall_sees_flags_written_after_the_first_read(chi2_zarr, tmp_path):
@@ -346,8 +467,34 @@ def test_chi2_refuses_stokes_it_cannot_form(tmp_path):
     from tests.fixtures.ms import make_ms
 
     info = make_ms(str(tmp_path / "dual.ms"), nant=4, nchan=4, ncorr=2, ntime=2, nscan=1)
+    # Outputs of an earlier run must survive a run that fails validation.
+    earlier = [tmp_path / "c.zarr" / "field0" / "kept", tmp_path / "i" / "field0" / "kept"]
+    for path in earlier:
+        path.parent.mkdir(parents=True)
+        path.write_text("from an earlier run")
     with pytest.raises(ValueError, match="Cannot form"):
         chi2(info["path"], dataout=tmp_path / "c.zarr", imagesout=tmp_path / "i", nthreads=1, stokes=["V"])
+    assert all(path.exists() for path in earlier)
+
+
+@needs_ms
+@pytest.mark.parametrize("which", ["dataout", "imagesout"])
+def test_chi2_refuses_to_delete_what_it_did_not_write(tmp_path, which):
+    """Outputs are deleted and recreated, so a mistyped path must be refused, not removed."""
+    from surfvis.core.chi2 import chi2
+    from tests.fixtures.ms import make_ms
+
+    info = make_ms(str(tmp_path / "small.ms"), nant=4, nchan=4, ncorr=2, ntime=2, nscan=1)
+    precious = tmp_path / "work" / "notes.txt"
+    precious.parent.mkdir()
+    precious.write_text("keep me")
+    outputs = {"dataout": tmp_path / "c.zarr", "imagesout": tmp_path / "i", which: precious.parent}
+    with pytest.raises(ValueError, match="does not look like an earlier surfvis chi2 output"):
+        chi2(info["path"], nthreads=1, **outputs)
+    assert precious.read_text() == "keep me"
+    # An MS given by mistake is refused too.
+    with pytest.raises(ValueError, match="refusing"):
+        chi2(info["path"], nthreads=1, **{**outputs, which: tmp_path / "small.ms"})
 
 
 @needs_web
@@ -565,6 +712,12 @@ def test_waterfall_bin(chi2_zarr):
     assert client.get(base + "&c0=40").status_code == 400
     assert client.get(base + "&quantity=nope").status_code == 400
     assert client.get(base.replace("RESIDUAL", "NOPE")).status_code == 404
+    assert client.get(base.replace("p=1", "p=99")).status_code == 404
+    assert client.get(base.replace("p=1", "p=-1")).status_code == 422
+    # A lower-triangle cell draws the baseline the way the MS stores it.
+    reverse, rvalues, _ = decode(client.get(base.replace("p=1&q=5", "p=5&q=1")).content)
+    assert reverse["title"].startswith(f"{names[1]}-{names[5]}")
+    np.testing.assert_array_equal(rvalues, values)
 
 
 @needs_web

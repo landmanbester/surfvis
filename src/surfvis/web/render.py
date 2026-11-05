@@ -3,15 +3,17 @@
 import io
 from datetime import datetime, timezone
 
-import matplotlib
+import numpy as np
+from matplotlib import colormaps
+from matplotlib.backends.backend_agg import FigureCanvasAgg
+from matplotlib.cm import ScalarMappable
+from matplotlib.colors import LogNorm, Normalize, to_hex
+from matplotlib.figure import Figure
+from matplotlib.patches import Rectangle
+from matplotlib.ticker import FuncFormatter
 
-matplotlib.use("Agg")
-
-import matplotlib.pyplot as plt  # noqa: E402
-import numpy as np  # noqa: E402
-from matplotlib import colormaps  # noqa: E402
-from matplotlib.colors import LogNorm, Normalize, to_hex  # noqa: E402
-from matplotlib.ticker import FuncFormatter  # noqa: E402
+# Figures are built directly, never through pyplot: routes run in a thread
+# pool, and pyplot's global figure manager is not thread-safe.
 
 CMAP = "inferno"
 # Colour for antenna pairs with no unflagged data.
@@ -88,7 +90,7 @@ def histogram_png(values: np.ndarray, norm, title: str = "") -> bytes:
     log = isinstance(norm, LogNorm)
     # Square, to sit beside the (square) grid at the same size; margins are
     # only what the tick labels need.
-    fig = plt.figure(figsize=(5.0, 5.0))
+    fig = _figure((5.0, 5.0))
     ax = fig.add_axes((0.04, 0.25, 0.92, 0.71))
     finite = values[np.isfinite(values)]
     if log:
@@ -119,7 +121,7 @@ def histogram_png(values: np.ndarray, norm, title: str = "") -> bytes:
         ax.spines[spine].set_visible(False)
 
     cax = fig.add_axes((0.04, 0.09, 0.92, 0.035))
-    fig.colorbar(plt.cm.ScalarMappable(norm=norm, cmap=CMAP), cax=cax, orientation="horizontal")
+    fig.colorbar(ScalarMappable(norm=norm, cmap=CMAP), cax=cax, orientation="horizontal")
     cax.tick_params(length=3, width=0.8, labelsize=8)
 
     return _png(fig)
@@ -127,7 +129,7 @@ def histogram_png(values: np.ndarray, norm, title: str = "") -> bytes:
 
 def waterfall_png(wf, cmap: str = "viridis", show_flags: bool = True) -> bytes:
     """Render a baseline waterfall, outlining the chunk that was clicked."""
-    fig = plt.figure(figsize=(9.5, 4.6))
+    fig = _figure((9.5, 4.6))
     ax = fig.add_subplot(111)
 
     values = wf.values
@@ -155,7 +157,7 @@ def waterfall_png(wf, cmap: str = "viridis", show_flags: bool = True) -> bytes:
     if wf.rect is not None:
         t0, tf, chan0, chanf = wf.rect
         ax.add_patch(
-            plt.Rectangle(
+            Rectangle(
                 (chan0 - 0.5, t0 - 0.5),
                 max(chanf - chan0, 1),
                 max(tf - t0, 1),
@@ -192,8 +194,14 @@ def waterfall_png(wf, cmap: str = "viridis", show_flags: bool = True) -> bytes:
     return _png(fig)
 
 
+def _figure(size: tuple[float, float]) -> Figure:
+    """A figure with its own Agg canvas, untouched by pyplot's global state."""
+    fig = Figure(figsize=size)
+    FigureCanvasAgg(fig)
+    return fig
+
+
 def _png(fig) -> bytes:
     buf = io.BytesIO()
     fig.savefig(buf, format="png", dpi=110)
-    plt.close(fig)
     return buf.getvalue()

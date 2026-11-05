@@ -37,8 +37,14 @@
         {% if s.model and s.model not in models %}<option value="{{ s.model }}" selected>{{ s.model }}</option>{% endif %}
       </select>
     </label>
-    <label class="wide">gain table
-      <input type="text" name="gtable"{% if "gtable" in keep %} class="keep"{% endif %} value="{{ s.gtable }}" placeholder="none &mdash; e.g. gains.qc/NET" spellcheck="false">
+    <label class="wide" title="Gain terms chi2 used, ones passed to surfvis serve --gtable, and *.qc terms next to the MS">gain table
+      <select name="gtable"{% if "gtable" in keep %} class="keep"{% endif %}>
+        <option value="" {% if not s.gtable %}selected{% endif %}>none</option>
+        {% for name in gtables %}
+        <option value="{{ name }}" {% if name == s.gtable %}selected{% endif %}>{{ name }}</option>
+        {% endfor %}
+        {% if s.gtable and s.gtable not in gtables %}<option value="{{ s.gtable }}" selected>{{ s.gtable }}</option>{% endif %}
+      </select>
     </label>
     <label>flags
       <select name="flagversion"{% if "flagversion" in keep %} class="keep"{% endif %}>

@@ -8,6 +8,14 @@ last_verified_commit: 02a50cf
 
 # Wiki changelog
 
+## 2026-11-05 — serve-ui review fixes merged up (verified at `HEADSHA`)
+
+- **Updated** `web-app.md` and `chi2-pipeline.md`, via serve-ui: antenna order
+  of reversed cells (which the canvas plane and `/waterfall.bin` share), the
+  gain-table allow-list (also on `/waterfall.bin`), index checks (`/flag`
+  rejects a negative antenna index, which would have wrapped to another
+  baseline), output safety in `chi2`, and zero weights.
+
 ## 2026-11-05 — review decisions merged up from serve-ui (verified at `02a50cf`)
 
 - **Updated** `chi2-pipeline.md` and `migration.md`, via serve-ui: hipped's

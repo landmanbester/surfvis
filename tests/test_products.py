@@ -104,3 +104,31 @@ def test_flagged_or_singular_gains_flag_the_data():
     assert f[1].all() and f[2].all()
     assert f[5, 0, 0] and not f[5, 0, 1]
     assert (w[f] == 0).all()
+
+
+def test_full_jones_weights_match_the_diagonal_path_for_diagonal_gains():
+    """Diagonal gains written as full Jones give the same values and weights as the diagonal path."""
+    rng = np.random.default_rng(4)
+    nrow, nchan, ant1, ant2, tidx, gains, _ = _setup(rng, full=False)
+    full = np.zeros(gains.jones.shape[:-1] + (4,), complex)
+    full[..., 0], full[..., 3] = gains.jones[..., 0], gains.jones[..., 1]
+    labels = ["XX", "XY", "YX", "YY"]
+    vis = _rand(rng, (nrow, nchan, 4))
+    weight = rng.uniform(0.5, 2, size=vis.shape)
+    flag = np.zeros(vis.shape, bool)
+
+    diag = products.form(labels, labels, vis, weight, flag, ant1, ant2, tidx, gains)
+    fj = products.form(labels, labels, vis, weight, flag, ant1, ant2, tidx, products.Gains(full, gains.flags))
+    for a, b in zip(diag, fj):
+        np.testing.assert_allclose(a, b, rtol=1e-12)
+
+
+def test_zero_weight_is_flagged_for_every_product():
+    """A zero weight carries no information: a correlation must not count it as a degree of freedom."""
+    vis = np.ones((1, 2, 2), complex)
+    weight = np.ones(vis.shape)
+    weight[0, 0, 0] = 0.0
+    weight[0, 1, 1] = np.nan
+    _, w, f = products.form(["XX", "YY", "I"], ["XX", "YY"], vis, weight, np.zeros(vis.shape, bool))
+    np.testing.assert_array_equal(f[0], [[True, False, True], [False, True, True]])
+    assert (w[f] == 0).all()

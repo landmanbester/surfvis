@@ -175,6 +175,7 @@ Useful flags:
 |---|---|---|
 | `--data` | *required* | The zarr from `chi2 --dataout`. |
 | `--ms` | from the dataset | Override if the MS moved. |
+| `--gtable` | none | A gain term the waterfall may offer (repeatable). The term `chi2` used, and terms in `*.qc` directories next to the MS, are offered anyway; no other path is opened. |
 | `--host` | `127.0.0.1` | Use `0.0.0.0` in a container, or to accept remote connections. |
 | `--port` | `8000` | Change if the port is taken. |
 | `--allow-flagging` | off | Let the browser write FLAG (see below). |
@@ -182,7 +183,9 @@ Useful flags:
 
 `--host 127.0.0.1` means nothing outside the machine can reach it. That is the
 right default; to view it from your laptop, forward the port rather than
-binding to `0.0.0.0` on a public interface.
+binding to `0.0.0.0` on a public interface. **The server has no
+authentication**: on `0.0.0.0`, anyone who can reach the port can browse the
+Measurement Set.
 
 ### Running where the data lives
 

@@ -91,7 +91,7 @@ cabs:
         dtype: Directory
         info:
           Output name of zarr dataset.
-          Saved in CWD/chi2 by default.
+          Saved as CWD/chi2.zarr by default.
         metadata:
           rich_help_panel: Outputs
       imagesout:
