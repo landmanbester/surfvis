@@ -24,7 +24,8 @@
         <div class="labels rows" aria-hidden="true">
           {% for name in names %}<span>{{ name }}</span>{% endfor %}
         </div>
-        <div class="grid">
+        <!-- One waterfall request at a time: a new click or arrow key aborts the last. -->
+        <div class="grid" hx-sync="this:replace">
           {% for p in range(nant) %}{% for q in range(nant) %}{% if p == q %}<i
             class="auto"
             style="background:{{ colours[p][q] }}"></i>{% else %}<i
@@ -39,8 +40,7 @@
 
     <figure class="hist">
       <div class="plot loading">
-        <img src="/histogram.png?{{ query }}&scale={{ scale }}"
-             onload="plotLoaded(this)" onerror="plotFailed(this)"
+        <img data-plot="/histogram.png?{{ query }}&scale={{ scale }}"
              alt="Histogram of chi-squared per degree of freedom over all antenna pairs">
       </div>
       <figcaption>

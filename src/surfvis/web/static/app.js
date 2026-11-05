@@ -132,24 +132,37 @@ document.addEventListener("keydown", (e) => {
   showReadout(next);
 });
 
-// PNGs are fetched by the browser, not htmx, so they report their own progress.
-function plotLoaded(img) {
-  img.parentElement.classList.remove("loading");
+// PNGs are fetched here rather than by an <img src>, so a failure's JSON detail
+// arrives with the response. Re-requesting the URL to read it would redo the
+// whole (expensive) MS read.
+async function loadPlot(img) {
+  const wrap = img.parentElement;
+  try {
+    const response = await fetch(img.dataset.plot);
+    if (!response.ok) {
+      let detail = "Could not render this plot.";
+      try {
+        detail = (await response.json()).detail || detail;
+      } catch (_) {}
+      throw new Error(detail);
+    }
+    const url = URL.createObjectURL(await response.blob());
+    img.addEventListener("load", () => URL.revokeObjectURL(url), { once: true });
+    img.src = url;
+    await img.decode().catch(() => {});
+    wrap.classList.remove("loading");
+  } catch (err) {
+    if (!wrap.isConnected) return; // replaced by a newer selection meanwhile
+    const p = document.createElement("p");
+    p.className = "problems";
+    p.textContent = err.message;
+    wrap.replaceWith(p);
+  }
 }
 
-async function plotFailed(img) {
-  const wrap = img.parentElement;
-  wrap.classList.remove("loading");
-  let detail = "Could not render this plot.";
-  try {
-    const body = await (await fetch(img.src)).json();
-    if (body.detail) detail = body.detail;
-  } catch (_) {}
-  const p = document.createElement("p");
-  p.className = "problems";
-  p.textContent = detail;
-  wrap.replaceWith(p);
-}
+document.body.addEventListener("htmx:afterSettle", (e) => {
+  e.detail.target.querySelectorAll("img[data-plot]:not([src])").forEach(loadPlot);
+});
 
 // Save the whole page as a PNG, including what is scrolled out of view, which
 // a screenshot cannot do. html-to-image (vendored) renders the DOM through an

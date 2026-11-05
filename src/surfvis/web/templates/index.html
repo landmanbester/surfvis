@@ -23,9 +23,8 @@
   </section>
 
   <main>
-    <section id="heatmap"
-             hx-get="/heatmap?field={{ field }}&spw={{ spw }}&scan={{ scan }}&t={{ times[0] }}&f={{ freqs[0] }}&c={{ corrs[0] }}"
-             hx-trigger="load">
+    <!-- Filled by the selector form's load trigger; a second trigger here fetched it twice. -->
+    <section id="heatmap">
       <p class="hint">Loading&hellip;</p>
     </section>
     <section id="waterfall">
