@@ -23,10 +23,10 @@ MARKERS = {"needs_ms", "needs_web"}
 EXPECTED = {
     "test_commands.py": (10, 10),
     "test_install.py": (2, 0),
-    "test_products.py": (7, 0),
+    "test_products.py": (9, 0),
     "test_roundtrip.py": (4, 0),
     "test_suite_integrity.py": (3, 0),
-    "test_web.py": (24, 24),
+    "test_web.py": (30, 30),
 }
 
 
