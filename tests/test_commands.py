@@ -183,10 +183,10 @@ def test_chi2_writes_per_correlation_and_combined_images(tiny_ms, tmp_path):
         scandir = out / "field0" / "spw0" / f"scan{scan}"
         assert (scandir / "combined.png").stat().st_size > 0
         # Default chunking: one time bin, one freq bin (nfreqs=128 > 32 channels), XX and YY.
-        assert sorted(p.name for p in scandir.glob("t*.png")) == ["t0_f0_c0.png", "t0_f0_c1.png"]
-        # Compare the plotted pixels, not the bytes: the titles ("corr 0" vs
-        # "corr 1") differ even when the data are identical.
-        c0, c1 = (plt.imread(scandir / f"t0_f0_c{c}.png") for c in (0, 1))
+        assert sorted(p.name for p in scandir.glob("t*.png")) == ["t0_f0_XX.png", "t0_f0_YY.png"]
+        # Compare the plotted pixels, not the bytes: the titles ("XX" vs "YY")
+        # differ even when the data are identical.
+        c0, c1 = (plt.imread(scandir / f"t0_f0_{c}.png") for c in ("XX", "YY"))
         top = c0.shape[0] // 8
         assert not np.array_equal(c0[top:], c1[top:]), "per-correlation images hold the same data"
 
