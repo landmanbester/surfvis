@@ -3,8 +3,8 @@ type: reference
 title: Chi-squared pipeline
 description: How chi2 and flag-chi2 chunk a Measurement Set, what the numba kernels compute, how results are reduced, and where images land.
 tags: [chi2, flagging, dask, numba, daskms]
-timestamp: 2026-09-18
-last_verified_commit: de24898
+timestamp: 2026-11-05
+last_verified_commit: a3e6e5d
 ---
 
 # Chi-squared pipeline
@@ -25,15 +25,22 @@ visibilities and auto-correlations (`p == q`) are excluded from the sums.
    `(FIELD_ID, DATA_DESC_ID, SCAN_NUMBER)`, to derive the chunking. `--ntimes`
    unique times per chunk (default: all of them) and `--nfreqs` channels per
    chunk (default 128) give the row/time/frequency bin indices and counts.
+   `--nfreqs -1` means each dataset's own channel count, worked out per
+   dataset (it used to leak the first SPW's width into the rest).
 2. **Pass two** re-opens the MS with those chunks and the residual, weight,
    flag, `ANTENNA1`, `ANTENNA2` and `TIME` columns.
-3. Every `(time bin, freq bin, corr)` triple is submitted to a
+3. Every `(time bin, freq bin, corr)` triple is submitted, with that
+   correlation's slice only (`isel(corr=[corrs[c]])`; the old code gave every
+   task all of `--use-corrs`, so the per-correlation images were identical), to a
    `concurrent.futures.ProcessPoolExecutor` (`--nthreads` workers) running
    `utils.plotting.surfchisq_plot`. That function computes its dask slices with
    the **synchronous** scheduler (it is already inside a worker process), calls
    the numba kernel `_surfchisq_slice`, writes one PNG, and returns
    `(field, spw, scan, chi2, counts)`.
-4. The parent accumulates those returns into per-`field/spw/scan` arrays and
+4. The parent accumulates those returns into per-`field/spw/scan` arrays of
+   `(nant, nant)`, with `nant` from the `ANTENNA` table, padding each chunk in:
+   a chunk only spans the antennas present in it, and sizing from the highest
+   antenna seen crashed whenever an antenna was missing from part of a scan. It
    finally writes a `combined.png` per scan from `chi2 / counts`, with `NaN`
    where `counts == 0`.
 

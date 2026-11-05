@@ -2,11 +2,18 @@
 type: log
 title: Wiki changelog
 description: Chronological record of what changed in the wiki and why.
-timestamp: 2026-09-18
-last_verified_commit: de24898
+timestamp: 2026-11-05
+last_verified_commit: a3e6e5d
 ---
 
 # Wiki changelog
+
+## 2026-11-05 — review fixes to chi2 (verified at `a3e6e5d`)
+
+- **Updated** `chi2-pipeline.md`: per-correlation slices (the images used to
+  be identical), accumulators sized from the ANTENNA table with chunks padded
+  in (an antenna missing from part of a scan crashed `--ntimes` runs), and
+  `--nfreqs -1` resolved per dataset.
 
 ## 2026-09-19 — conversion review pass (verified at `c3bd176`)
 
