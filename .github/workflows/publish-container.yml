@@ -1,14 +1,19 @@
 name: Publish Container
 
+# Manual only while development happens on the landmanbester fork: IMAGE_NAME
+# below follows the repository, so automatic runs there would publish
+# ghcr.io/landmanbester/surfvis, which nothing pulls. Restore these triggers
+# when the work merges back into ratt-ru/surfvis:
+#
+#   push:
+#     tags:
+#       - 'v*.*.*'
+#     branches:
+#       - master
+#   pull_request:
+#     branches:
+#       - master
 on:
-  push:
-    tags:
-      - 'v*.*.*'
-    branches:
-      - master
-  pull_request:
-    branches:
-      - master
   workflow_dispatch:
 
 # Cab generation is handled by pre-commit hooks locally.

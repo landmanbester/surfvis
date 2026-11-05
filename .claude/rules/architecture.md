@@ -28,7 +28,7 @@ surfvis/
 └── .github/workflows/
     ├── ci.yml
     ├── publish.yml             # PyPI on tag push
-    ├── publish-container.yml   # ghcr.io on tag + every push to master
+    ├── publish-container.yml   # ghcr.io; manual-only on the fork (see the file)
     └── update-cabs.yml         # Regenerates cabs on merge to master
 ```
 
@@ -125,7 +125,9 @@ Three things keep this in sync — do not bypass them:
 
 1. **Feature branches:** Edit `_container_image.py` by hand to point at your
    branch tag (e.g. `:my-feature`). The `publish-container.yml` workflow builds
-   and pushes that tag on every push of the PR.
+   and pushes that tag on every push of the PR. (On the `landmanbester` fork it is
+   manual-only, since it would publish under the fork's name; restore the
+   triggers when merging back into `ratt-ru`.)
 2. **Merge to `master`:** The `update-cabs.yml` workflow resets the
    tag to `latest` and regenerates cabs in a `[skip checks]` commit.
 3. **Releases:** `tbump <version>` rewrites the tag to the semantic version and
