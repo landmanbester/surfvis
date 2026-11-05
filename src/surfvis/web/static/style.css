@@ -105,7 +105,6 @@ main { display: flex; flex-direction: column; gap: 1rem; padding: 1rem; }
 .wf-reset:hover { border-color: var(--accent); }
 .wf-canvas { display: block; width: 100%; background: #fff; border-radius: 6px; touch-action: none; }
 .wf .plot.refining::after { content: "refining\2026"; position: absolute; color: var(--muted); font-size: 0.75rem; top: 0.4rem; right: 0.6rem; left: auto; text-align: right; }
-.swatch { display: inline-block; width: 0.8rem; height: 0.8rem; vertical-align: -1px; border: 2px solid var(--accent); }
 
 .note { color: #f0c674; font-size: 0.78rem; margin: 0 0 0.6rem; }
 .problems { color: #ff7b72; font-size: 0.82rem; margin: 0.4rem 0; padding-left: 1.2rem; }

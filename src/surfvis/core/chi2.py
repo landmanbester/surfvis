@@ -46,8 +46,8 @@ def chi2(
         mcol: Model column, subtracted after correction.
         gtable: QuartiCal gain term (``gains.qc/NET``) to correct by.
         dataout: Output name of the zarr dataset holding chi-squared and counts
-            per (time bin, freq bin, product, antenna, antenna). Defaults to
-            ``$CWD/chi2.zarr``. This is what ``surfvis serve`` reads.
+            per (product, antenna, antenna), summed over each scan. Defaults
+            to ``$CWD/chi2.zarr``. This is what ``surfvis serve`` reads.
         imagesout: Output folder for images. Defaults to ``$CWD/chi2``.
         nthreads: Number of worker processes (also the dask thread-pool size).
         ntimes: Number of unique times in each chunk. ``None`` means all of them.
@@ -188,7 +188,9 @@ def chi2(
             print(f"Removing existing {path} folder")
             shutil.rmtree(path)
 
-    # Per-chunk cubes, so the zarr keeps what the PNGs throw away.
+    # Per-scan totals. Time and frequency chunks only split the work (and give
+    # the per-chunk PNGs); the zarr holds one (product, antenna, antenna) sum
+    # per scan, so memory does not grow with the number of chunks.
     cubes = {}
     keys = {}
     futures = {}
@@ -242,8 +244,8 @@ def chi2(
 
             keys[i] = (int(field), int(spw), int(scan))
             cubes[i] = (
-                np.zeros((ntime, nfreq, nprod, nant, nant), dtype=float),
-                np.zeros((ntime, nfreq, nprod, nant, nant), dtype=float),
+                np.zeros((nprod, nant, nant), dtype=float),
+                np.zeros((nprod, nant, nant), dtype=float),
             )
             print(f"Submitted field{field}_spw{spw}_scan{scan}")
 
@@ -257,18 +259,14 @@ def chi2(
             chi2_cube, count_cube = cubes[i]
             # A chunk only spans the antennas present in it; pad into the full grid.
             na = chi2_chunk.shape[-1]
-            chi2_cube[t, f, :, :na, :na] = chi2_chunk
-            count_cube[t, f, :, :na, :na] = count
+            chi2_cube[:, :na, :na] += chi2_chunk
+            count_cube[:, :na, :na] += count
         print()
 
     _write_zarr_dataset(
         dataout,
         cubes,
         keys,
-        tbin_idx,
-        tbin_counts,
-        fbin_idx,
-        fbin_counts,
         products,
         antenna_names,
         msname,
@@ -298,8 +296,8 @@ def chi2(
         for name, sel, title in groups:
             if not sel.any():
                 continue
-            val = chi2_cube[:, :, sel].sum(axis=(0, 1, 2))
-            count = count_cube[:, :, sel].sum(axis=(0, 1, 2))
+            val = chi2_cube[sel].sum(axis=0)
+            count = count_cube[sel].sum(axis=0)
             chi2_dof = np.full_like(val, np.nan)
             chi2_dof[count > 0] = val[count > 0] / count[count > 0]
             makeplot(chi2_dof, basename + name, title)
@@ -360,22 +358,16 @@ def _write_zarr_dataset(
     dataout,
     cubes,
     keys,
-    tbin_idx,
-    tbin_counts,
-    fbin_idx,
-    fbin_counts,
     products,
     antenna_names,
     msname,
     columns,
 ):
-    """Write the per-chunk chi-squared cubes to a zarr store.
+    """Write each scan's chi-squared and counts to a zarr store.
 
-    One group per (field, spw, scan), because the number of time and frequency
-    bins differs between them. Bin bounds ride along as coordinates so a reader
-    can locate a chunk inside the scan's waterfall without re-deriving the
-    chunking. ``columns`` records how the quantity was formed, so a reader can
-    reproduce it.
+    One group per (field, spw, scan), holding ``(product, antenna1,
+    antenna2)`` sums over the whole scan. ``columns`` records how the quantity
+    was formed, so a reader can reproduce it.
     """
     import xarray as xr
 
@@ -389,25 +381,11 @@ def _write_zarr_dataset(
 
     for i, (chi2_cube, count_cube) in cubes.items():
         field, spw, scan = keys[i]
-        ntime, nfreq, nprod = chi2_cube.shape[:3]
-        t0 = np.asarray(tbin_idx[i][:ntime], dtype=int)
-        tf = t0 + np.asarray(tbin_counts[i][:ntime], dtype=int)
-        chan0 = np.asarray(fbin_idx[i][:nfreq], dtype=int)
-        chanf = chan0 + np.asarray(fbin_counts[i][:nfreq], dtype=int)
-
-        dims = ("time_bin", "freq_bin", "product", "antenna1", "antenna2")
+        nprod = chi2_cube.shape[0]
+        dims = ("product", "antenna1", "antenna2")
         ds = xr.Dataset(
-            data_vars={
-                "chi2": (dims, chi2_cube),
-                "counts": (dims, count_cube),
-                "t0": ("time_bin", t0),
-                "tf": ("time_bin", tf),
-                "chan0": ("freq_bin", chan0),
-                "chanf": ("freq_bin", chanf),
-            },
+            data_vars={"chi2": (dims, chi2_cube), "counts": (dims, count_cube)},
             coords={
-                "time_bin": np.arange(ntime),
-                "freq_bin": np.arange(nfreq),
                 "product": np.asarray(products[:nprod], dtype=str),
                 "antenna1": np.arange(nant),
                 "antenna2": np.arange(nant),

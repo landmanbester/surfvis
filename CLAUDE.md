@@ -49,7 +49,7 @@ docker run --rm --user "$(id -u):$(id -g)" -e HOME=/tmp -v "$PWD":/src -w /src \
    PYTHONPATH=/tmp/t:/src/src:/src /tmp/t/bin/pytest tests/ -q -W ignore"
 ```
 
-That is the only way to run the full suite (98 tests; the node one skips in the container). **CI does not run them** —
+That is the only way to run the full suite (99 tests; the node one skips in the container). **CI does not run them** —
 `.github/workflows/ci.yml` installs the lightweight package only, deliberately,
 since python-casacore and numba make CI slow and brittle. Verify locally.
 
@@ -92,8 +92,9 @@ Three layers, and the boundary between them is load-bearing:
 stack, `[web]` the browser. The Dockerfile installs `[full,web]`.
 
 Data flow for the browser: `chi2 --dataout` writes χ² and counts per
-`(time bin, freq bin, product, antenna, antenna)`, one zarr group per
-`(field, spw, scan)`. `serve` reads that for the heatmap and only opens the MS
+`(product, antenna, antenna)`, summed over the scan, one zarr group per
+`(field, spw, scan)`. `--ntimes`/`--nfreqs` only chunk the work (and the
+per-chunk PNGs); the browser shows one scan at a time. `serve` reads that for the heatmap and only opens the MS
 when a waterfall is requested. The waterfall's model / gain table / flag
 version / product controls recompute the waterfall only; they default to how
 `chi2` formed the heatmap, and the panel says when they no longer match.

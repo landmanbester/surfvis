@@ -13,7 +13,6 @@ import { View, Latest, niceTicks, wheelFactor } from "./view.mjs";
 const MARGIN = { left: 76, right: 78, top: 8, bottom: 40 };
 const ASPECT = 0.48; // canvas height / width, as the PNG's 9.5 x 4.6
 const REFINE_MS = 150;
-const OUTLINE = "#39ff14";
 const FONT = "12px ui-sans-serif, system-ui, sans-serif";
 
 function utc(seconds) {
@@ -115,14 +114,6 @@ export async function mount(root) {
     ctx.clip();
     ctx.imageSmoothingEnabled = false;
     ctx.drawImage(image, a.x, b.y, b.x - a.x, a.y - b.y);
-    if (h.rect) {
-      const [t0, tf, c0, cf] = h.rect;
-      const p = view.toScreen(t0 - 0.5, c0 - 0.5, r);
-      const q = view.toScreen(tf - 0.5, cf - 0.5, r);
-      ctx.strokeStyle = OUTLINE;
-      ctx.lineWidth = 2;
-      ctx.strokeRect(p.x, q.y, q.x - p.x, p.y - q.y);
-    }
     for (const layer of layers) layer(ctx, api);
     ctx.restore();
 

@@ -2,9 +2,7 @@
   <div class="panel-head">
     <h2>{{ name1 }} &times; {{ name2 }}</h2>
     <p class="meta">
-      &chi;<sup>2</sup>/dof {{ "%.2f"|format(value) }} &middot;
-      chunk: time {{ t0 }}&ndash;{{ tf }}, channels {{ chan0 }}&ndash;{{ chanf }}
-      <span class="swatch"></span> outlined below
+      &chi;<sup>2</sup>/dof {{ "%.2f"|format(value) }} over scan {{ base.scan }}
     </p>
   </div>
 
@@ -66,7 +64,7 @@
   {% if differs %}
   <p class="note">
     The waterfall no longer shows what the heatmap measured
-    ({{ chunk.selection.product }}, {% if chunk.gtable %}corrected {% endif %}{{ chunk.rcol }}{% if chunk.mcol %} &minus; {{ chunk.mcol }}{% endif %}, current flags).
+    ({{ matrix.selection.product }}, {% if matrix.gtable %}corrected {% endif %}{{ matrix.rcol }}{% if matrix.mcol %} &minus; {{ matrix.mcol }}{% endif %}, current flags).
   </p>
   {% endif %}
 

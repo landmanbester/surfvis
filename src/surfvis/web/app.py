@@ -99,9 +99,9 @@ def create_app(
     templates.env.globals["static_version"] = _static_version(HERE / "static")
 
     first = store.scans[0]
-    ms_path = str(ms) if ms is not None else store.chunk(Selection(*first, 0, 0, store.bins(*first)[2][0])).ms
+    ms_path = str(ms) if ms is not None else store.matrix(Selection(*first, store.products(*first)[0])).ms
 
-    recorded = sorted({store.chunk_attrs(*key).get("gtable", "") for key in store.scans} - {""})
+    recorded = sorted({store.attrs(*key).get("gtable", "") for key in store.scans} - {""})
 
     def _gain_tables() -> dict[str, str]:
         """Offered gain terms, as {real path: spelling shown}. Re-scanned per request, so new solves appear."""
@@ -114,35 +114,28 @@ def create_app(
     def _allowed(gtable: str) -> bool:
         return not gtable or os.path.realpath(gains_mod.term_path(gtable)) in _gain_tables()
 
-    def _selection(field, spw, scan, t, f, c) -> Selection:
-        return Selection(field=field, spw=spw, scan=scan, time_bin=t, freq_bin=f, product=c)
-
-    def _chunk(field, spw, scan, t, f, c):
+    def _matrix(field, spw, scan, c):
         try:
-            return store.chunk(_selection(field, spw, scan, t, f, c))
+            return store.matrix(Selection(field=field, spw=spw, scan=scan, product=c))
         except (KeyError, IndexError, ValueError) as exc:
-            raise HTTPException(status_code=404, detail=f"No such chunk: {exc}") from exc
+            raise HTTPException(status_code=404, detail=f"No such scan or product: {exc}") from exc
 
-    def _baseline(chunk, p, q) -> tuple[str, str]:
-        names = chunk.antenna_names
+    def _baseline(matrix, p, q) -> tuple[str, str]:
+        names = matrix.antenna_names
         if not (p < len(names) and q < len(names)):
             raise HTTPException(status_code=404, detail=f"No antenna pair ({p}, {q}); there are {len(names)} antennas")
         return names[p], names[q]
 
-    def _selectors(request, field, spw, scan, t=0, f=0, c="", scale="log"):
-        times, freqs, corrs = store.bins(field, spw, scan)
+    def _selectors(request, field, spw, scan, c="", scale="log"):
+        corrs = store.products(field, spw, scan)
         return {
             "store": store,
             "field_names": msdata.field_names(ms_path),
             "field": field,
             "spw": spw,
             "scan": scan,
-            "times": times,
-            "freqs": freqs,
             "corrs": corrs,
-            # Keep the bin, product and scale across a change of scan where they still exist.
-            "t": t if t in times else times[0],
-            "f": f if f in freqs else freqs[0],
+            # Keep the product and scale across a change of scan where they still exist.
             "c": c if c in corrs else corrs[0],
             "scale": scale if scale in render.SCALES else "log",
         }
@@ -160,12 +153,10 @@ def create_app(
         field: int = Query(...),
         spw: int = Query(...),
         scan: int | None = Query(None),
-        t: int = Query(0),
-        f: int = Query(0),
         c: str = Query(""),
         scale: str = Query("log"),
     ):
-        """Re-render the selectors when field, spw or scan changes: each scan has its own bins."""
+        """Re-render the selectors when field, spw or scan changes: each scan has its own products."""
         if field not in store.fields:
             raise HTTPException(status_code=404, detail=f"No field {field}")
         spws = store.spws(field)
@@ -174,9 +165,7 @@ def create_app(
         numbers = store.scan_numbers(field, spw)
         if scan not in numbers:
             scan = numbers[0]
-        return templates.TemplateResponse(
-            request, "_selectors.html", _selectors(request, field, spw, scan, t, f, c, scale)
-        )
+        return templates.TemplateResponse(request, "_selectors.html", _selectors(request, field, spw, scan, c, scale))
 
     @app.get("/heatmap", response_class=HTMLResponse)
     def heatmap(
@@ -184,41 +173,39 @@ def create_app(
         field: int = Query(...),
         spw: int = Query(...),
         scan: int = Query(...),
-        t: int = Query(0, ge=0),
-        f: int = Query(0, ge=0),
         c: str = Query(...),
         scale: str = Query("log"),
     ):
-        chunk = _chunk(field, spw, scan, t, f, c)
+        matrix = _matrix(field, spw, scan, c)
 
         try:
-            norm, vmin, vmax = render.make_norm(chunk.chi2_dof, scale)
+            norm, vmin, vmax = render.make_norm(matrix.chi2_dof, scale)
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
-        colours = render.cell_colours(chunk.chi2_dof, norm)
-        finite = chunk.finite
+        colours = render.cell_colours(matrix.chi2_dof, norm)
+        finite = matrix.finite
         # What the hover readout and keyboard navigation need, sent once
         # rather than as attributes on every cell.
         grid = {
-            "names": chunk.antenna_names,
-            "values": [[None if np.isnan(v) else round(float(v), 4) for v in row] for row in chunk.chi2_dof],
-            "positions": msdata.antenna_positions(ms_path, chunk.antenna_names),
+            "names": matrix.antenna_names,
+            "values": [[None if np.isnan(v) else round(float(v), 4) for v in row] for row in matrix.chi2_dof],
+            "positions": msdata.antenna_positions(ms_path, matrix.antenna_names),
         }
         return templates.TemplateResponse(
             request,
             "_heatmap.html",
             {
-                "chunk": chunk,
+                "matrix": matrix,
                 "colours": colours,
-                "names": chunk.antenna_names,
-                "nant": len(chunk.antenna_names),
+                "names": matrix.antenna_names,
+                "nant": len(matrix.antenna_names),
                 "vmin": vmin,
                 "vmax": vmax,
                 "scale": scale,
-                "nvalid": chunk.nbaselines,
-                "worst": float(np.nanmax(chunk.chi2_dof)) if finite.size else float("nan"),
+                "nvalid": matrix.nbaselines,
+                "worst": float(np.nanmax(matrix.chi2_dof)) if finite.size else float("nan"),
                 "median": float(np.median(finite)) if finite.size else float("nan"),
-                "query": urlencode({"field": field, "spw": spw, "scan": scan, "t": t, "f": f, "c": c}),
+                "query": urlencode({"field": field, "spw": spw, "scan": scan, "c": c}),
                 "scales": render.SCALES,
                 "product": c,
                 "grid": grid,
@@ -230,17 +217,15 @@ def create_app(
         field: int = Query(...),
         spw: int = Query(...),
         scan: int = Query(...),
-        t: int = Query(0, ge=0),
-        f: int = Query(0, ge=0),
         c: str = Query(...),
         scale: str = Query("log"),
     ):
-        chunk = _chunk(field, spw, scan, t, f, c)
+        matrix = _matrix(field, spw, scan, c)
         try:
-            norm, _, _ = render.make_norm(chunk.chi2_dof, scale)
+            norm, _, _ = render.make_norm(matrix.chi2_dof, scale)
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
-        png = render.histogram_png(chunk.chi2_dof, norm)
+        png = render.histogram_png(matrix.chi2_dof, norm)
         return Response(png, media_type="image/png")
 
     def _resolve(column: str) -> str:
@@ -252,17 +237,17 @@ def create_app(
         except Exception:
             return column
 
-    def _waterfall_settings(chunk, product, column, model, gtable, flagversion, quantity):
+    def _waterfall_settings(matrix, product, column, model, gtable, flagversion, quantity):
         """Fill unset waterfall controls from how chi2 formed the heatmap.
 
         ``None`` means "not given", so the heatmap's setting applies; an empty
         string is a deliberate "none" (no model, no gains).
         """
         return {
-            "product": product or chunk.selection.product,
-            "column": _resolve(column or chunk.rcol),
-            "model": _resolve(chunk.mcol if model is None else model),
-            "gtable": chunk.gtable if gtable is None else gtable.strip(),
+            "product": product or matrix.selection.product,
+            "column": _resolve(column or matrix.rcol),
+            "model": _resolve(matrix.mcol if model is None else model),
+            "gtable": matrix.gtable if gtable is None else gtable.strip(),
             "flagversion": flagversion or "",
             "quantity": quantity,
         }
@@ -273,8 +258,6 @@ def create_app(
         field: int = Query(...),
         spw: int = Query(...),
         scan: int = Query(...),
-        t: int = Query(..., ge=0),
-        f: int = Query(..., ge=0),
         c: str = Query(...),
         p: int = Query(..., ge=0),
         q: int = Query(..., ge=0),
@@ -291,10 +274,10 @@ def create_app(
         computed, so the panel says when the two no longer describe the same
         quantity.
         """
-        chunk = _chunk(field, spw, scan, t, f, c)
-        name1, name2 = _baseline(chunk, p, q)
-        settings = _waterfall_settings(chunk, product, column, model, gtable, flagversion, quantity)
-        base = {"field": field, "spw": spw, "scan": scan, "t": t, "f": f, "c": c, "p": p, "q": q}
+        matrix = _matrix(field, spw, scan, c)
+        name1, name2 = _baseline(matrix, p, q)
+        settings = _waterfall_settings(matrix, product, column, model, gtable, flagversion, quantity)
+        base = {"field": field, "spw": spw, "scan": scan, "c": c, "p": p, "q": q}
         offered = _gain_tables()
         if not _allowed(settings["gtable"]):
             problems = [
@@ -313,7 +296,7 @@ def create_app(
                 gtable=settings["gtable"],
                 flagversion=settings["flagversion"],
             )
-        defaults = _waterfall_settings(chunk, "", "", None, None, "", "amp")
+        defaults = _waterfall_settings(matrix, "", "", None, None, "", "amp")
         # Controls the user moved off the heatmap's setting. Clicking another
         # cell sends these along, so a choice survives a change of baseline.
         keep = {key for key, value in settings.items() if value != defaults[key]}
@@ -326,7 +309,7 @@ def create_app(
                 "name1": name1,
                 "name2": name2,
                 "gtables": list(offered.values()),
-                "value": float(chunk.chi2_dof[p, q]),
+                "value": float(matrix.chi2_dof[p, q]),
                 # The column is corrected and has a model subtracted, so only
                 # visibility-like columns make sense; WEIGHT does not.
                 "columns": _columns(ms_path, field, spw, scan, complex_only=True),
@@ -335,14 +318,10 @@ def create_app(
                 "flagversions": msdata.flag_versions(ms_path),
                 "quantities": msdata.QUANTITIES,
                 "s": settings,
-                "chunk": chunk,
+                "matrix": matrix,
                 "keep": keep,
                 "differs": bool(keep - {"quantity"}),
                 "problems": problems,
-                "t0": chunk.t0,
-                "tf": chunk.tf,
-                "chan0": chunk.chan0,
-                "chanf": chunk.chanf,
             },
         )
 
@@ -351,8 +330,6 @@ def create_app(
         field: int = Query(...),
         spw: int = Query(...),
         scan: int = Query(...),
-        t: int = Query(..., ge=0),
-        f: int = Query(..., ge=0),
         c: str = Query(...),
         p: int = Query(..., ge=0),
         q: int = Query(..., ge=0),
@@ -363,9 +340,9 @@ def create_app(
         flagversion: str = Query(""),
         quantity: str = Query("amp"),
     ):
-        chunk = _chunk(field, spw, scan, t, f, c)
-        name1, name2 = _baseline(chunk, p, q)
-        settings = _waterfall_settings(chunk, product, column, model, gtable, flagversion, quantity)
+        matrix = _matrix(field, spw, scan, c)
+        name1, name2 = _baseline(matrix, p, q)
+        settings = _waterfall_settings(matrix, product, column, model, gtable, flagversion, quantity)
         if not _allowed(settings["gtable"]):
             raise HTTPException(status_code=403, detail="That gain table is not one this server offers.")
         try:
@@ -376,7 +353,7 @@ def create_app(
                 scan=scan,
                 name1=name1,
                 name2=name2,
-                rect=(chunk.t0, chunk.tf, chunk.chan0, chunk.chanf),
+                rect=None,
                 **settings,
             )
         except (KeyError, ValueError, FileNotFoundError) as exc:
@@ -388,8 +365,6 @@ def create_app(
         field: int = Query(...),
         spw: int = Query(...),
         scan: int = Query(...),
-        t: int = Query(..., ge=0),
-        f: int = Query(..., ge=0),
         c: str = Query(...),
         p: int = Query(..., ge=0),
         q: int = Query(..., ge=0),
@@ -410,9 +385,9 @@ def create_app(
         """A window of one baseline's waterfall, reduced to at most max_t x max_c bins, for the canvas."""
         if quantity not in msdata.QUANTITIES:
             raise HTTPException(status_code=400, detail=f"quantity must be one of {msdata.QUANTITIES}")
-        chunk = _chunk(field, spw, scan, t, f, c)
-        name1, name2 = _baseline(chunk, p, q)
-        settings = _waterfall_settings(chunk, product, column, model, gtable, flagversion, quantity)
+        matrix = _matrix(field, spw, scan, c)
+        name1, name2 = _baseline(matrix, p, q)
+        settings = _waterfall_settings(matrix, product, column, model, gtable, flagversion, quantity)
         settings.pop("quantity")
         if not _allowed(settings["gtable"]):
             raise HTTPException(status_code=403, detail="That gain table is not one this server offers.")
@@ -456,7 +431,6 @@ def create_app(
             "quantity": quantity,
             "colormap": "twilight" if quantity == "phase" else "viridis",
             "title": f"{wf.antenna1}-{wf.antenna2}{length}   scan {wf.scan}   {wf.column}   {quantity}   {wf.product}",
-            "rect": [chunk.t0, chunk.tf, chunk.chan0, chunk.chanf],
         }
         if meta:
             header["times"] = [float(x) for x in wf.times] if wf.times is not None else None

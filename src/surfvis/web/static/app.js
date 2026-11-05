@@ -180,7 +180,7 @@ function pageName() {
     const el = document.querySelector(`#selectors select[name="${name}"]`);
     return el ? el.selectedOptions[0]?.textContent.trim() : "";
   };
-  const parts = ["surfvis", pick("field"), `scan${pick("scan")}`, `t${pick("t")}`, `f${pick("f")}`, pick("c")];
+  const parts = ["surfvis", pick("field"), `scan${pick("scan")}`, pick("c")];
   if (selected && document.querySelector("#waterfall .panel")) parts.push(`${selected[0]}-${selected[1]}`);
   return parts.filter(Boolean).join("_").replace(/[^A-Za-z0-9_.+-]+/g, "") + ".png";
 }
