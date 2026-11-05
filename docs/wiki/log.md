@@ -3,12 +3,12 @@ type: log
 title: Wiki changelog
 description: Chronological record of what changed in the wiki and why.
 timestamp: 2026-11-05
-last_verified_commit: 853555a
+last_verified_commit: 2a97e03
 ---
 
 # Wiki changelog
 
-## 2026-11-05 — review decisions merged up from hipped (verified at `HEADSHA`)
+## 2026-11-05 — review decisions merged up from hipped (verified at `2a97e03`)
 
 - **Updated** `chi2-pipeline.md`: the `flag-chi2` fixes (autocorrelations
   skipped, non-finite flagged, no `fastmath`, `FLAG_ROW` only ever added to).
