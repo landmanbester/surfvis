@@ -8,6 +8,14 @@ last_verified_commit: 1ab4f7c
 
 # Wiki changelog
 
+## 2026-11-05 — review fixes merged up from hipped
+
+- **Updated** `chi2-pipeline.md`: `--nfreqs -1` is resolved per dataset (it
+  leaked the first SPW's width into the rest). hipped also fixed the identical
+  per-correlation images and the missing-antenna crash; this branch already
+  had both, by its own route (per-product slices, chunks padded into the
+  ANTENNA-sized grid).
+
 ## 2026-10-16 — Save as PNG (verified at `1ab4f7c`)
 
 - **Updated** `web-app.md`: in-browser page capture with vendored

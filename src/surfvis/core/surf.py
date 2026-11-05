@@ -105,7 +105,7 @@ def surf(
         # Determine unprojected baseline length
         ap1 = antpos[baseline[0]]
         ap2 = antpos[baseline[1]]
-        blength = (((ap1[0] - ap2[0]) ** 2.0) + ((ap1[1] - ap2[1]) ** 2.0) + ((ap1[2] - ap1[2]) ** 2.0)) ** 0.5
+        blength = (((ap1[0] - ap2[0]) ** 2.0) + ((ap1[1] - ap2[1]) ** 2.0) + ((ap1[2] - ap2[2]) ** 2.0)) ** 0.5
         blength = str(round(blength / 1000.0, 2))
 
         print("Plotting baseline:", baseline, "     Deprojected length:", blength, "km")
