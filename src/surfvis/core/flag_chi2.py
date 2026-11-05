@@ -25,11 +25,15 @@ def flag_chi2(
 ) -> None:
     """Update the flag column of ``ms`` in place.
 
+    Flags are only ever added. Autocorrelations are skipped, and a non-finite
+    chi-squared is flagged.
+
     Args:
         ms: Measurement Set to flag. Modified in place.
         rcol: Residual column.
         wcol: Weight column. ``SIGMA_SPECTRUM`` initialises weights as 1/sigma**2.
-        fcol: Flag column, written back to the Measurement Set.
+        fcol: Flag column, written back to the Measurement Set. ``FLAG_ROW`` is
+            updated (never cleared) only when this is ``FLAG``.
         flag_above: Flag data with chi-squared above this value.
         nthreads: Number of dask threads to use.
         nrows: Number of rows in each chunk.
@@ -49,9 +53,10 @@ def flag_chi2(
         fcol: {"dims": ("chan", "corr")},
     }
 
+    write_flag_row = fcol == "FLAG"
     xds = xds_from_ms(
         msname,
-        columns=[rcol, wcol, fcol, "ANTENNA1", "ANTENNA2"],
+        columns=[rcol, wcol, fcol, "ANTENNA1", "ANTENNA2"] + (["FLAG_ROW"] if write_flag_row else []),
         chunks={"row": nrows, "chan": nfreqs},
         group_cols=["FIELD_ID", "DATA_DESC_ID", "SCAN_NUMBER"],
         table_schema=schema,
@@ -90,14 +95,16 @@ def flag_chi2(
 
         out_ds = ds.assign(**{fcol: (("row", "chan", "corr"), uflag)})
 
-        # update FLAG_ROW
-        flag_row = da.all(uflag.rechunk({1: -1, 2: -1}), axis=(1, 2))
-
-        out_ds = out_ds.assign(**{"FLAG_ROW": (("row",), flag_row)})
+        # FLAG_ROW summarises FLAG, so it is only touched when FLAG is the
+        # column being written, and only ever set: a row flagged before stays so.
+        if write_flag_row:
+            flag_row = ds.FLAG_ROW.data | da.all(uflag.rechunk({1: -1, 2: -1}), axis=(1, 2))
+            out_ds = out_ds.assign(**{"FLAG_ROW": (("row",), flag_row)})
 
         out_data.append(out_ds)
 
-    writes = xds_to_table(out_data, msname, columns=[fcol, "FLAG_ROW"], rechunk=True)
+    columns = [fcol, "FLAG_ROW"] if write_flag_row else [fcol]
+    writes = xds_to_table(out_data, msname, columns=columns, rechunk=True)
 
     with ProgressBar():
         dask.compute(writes)

@@ -46,7 +46,7 @@ Python parameter name and does not support explicit `param_decls`.
 | `--doacorr` | `--doacorr` / `--no-doacorr` | As above. |
 | `--scale` | `--scale` | Defaults to `None` (scale to 5 sigma) rather than `-1`. `-1` is still accepted. |
 | `--cmap` | `--cmap` | — |
-| `-o`, `--opdir` | `--opdir` | Defaults to `None`, which still resolves to `<ms>_<datacolumn>__plots`. |
+| `-o`, `--opdir` | `--opdir` | Defaults to `None`, which now resolves to `<ms name>_<datacolumn>__plots` in the working directory, not beside the MS (unwritable in a container). |
 
 ## `surfchi2` → `surfvis chi2`
 

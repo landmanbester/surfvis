@@ -8,6 +8,14 @@ last_verified_commit: 853555a
 
 # Wiki changelog
 
+## 2026-11-05 — review decisions merged up from hipped (verified at `HEADSHA`)
+
+- **Updated** `chi2-pipeline.md`: the `flag-chi2` fixes (autocorrelations
+  skipped, non-finite flagged, no `fastmath`, `FLAG_ROW` only ever added to).
+  `--dataout` stays implemented here; hipped's "not yet implemented" marking
+  was not taken.
+- **Updated** `migration.md`: `surf --opdir` defaults to the working directory.
+
 ## 2026-11-05 — review fixes merged up from hipped (verified at `853555a`)
 
 - **Updated** `chi2-pipeline.md`: `--nfreqs -1` is resolved per dataset (it

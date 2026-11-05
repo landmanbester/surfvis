@@ -147,10 +147,15 @@ def flagchisq(resid, weight, flag, ant1, ant2, use_corrs=(), flag_above=5, respe
     return res
 
 
-@njit(fastmath=True, nogil=True)
+# No fastmath: it lets numba assume finite values, so a NaN or infinite
+# chi-squared could compare either way.
+@njit(nogil=True)
 def _flagchisq(resid, weight, flag, ant1, ant2, use_corrs, flag_above, respect_ants):
     nrow, nchan, ncorr = resid.shape
     for r in range(nrow):
+        # Autocorrelations carry no residual chi-squared; chi2 skips them too.
+        if ant1[r] == ant2[r]:
+            continue
         if ant1[r] in respect_ants or ant2[r] in respect_ants:
             continue
         for f in range(nchan):
@@ -158,6 +163,6 @@ def _flagchisq(resid, weight, flag, ant1, ant2, use_corrs, flag_above, respect_a
                 res = resid[r, f, c]
                 w = weight[r, f, c]
                 chi2 = (np.conj(res) * w * res).real
-                if chi2 > flag_above or chi2 == 0:
+                if not np.isfinite(chi2) or chi2 > flag_above or chi2 == 0:
                     flag[r, f, :] = True
     return flag
