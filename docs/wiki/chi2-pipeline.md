@@ -4,7 +4,7 @@ title: Chi-squared pipeline
 description: How chi2 and flag-chi2 chunk a Measurement Set, what the numba kernels compute, how results are reduced, and where images land.
 tags: [chi2, flagging, dask, numba, daskms]
 timestamp: 2026-11-05
-last_verified_commit: 853555a
+last_verified_commit: c57e964
 ---
 
 # Chi-squared pipeline

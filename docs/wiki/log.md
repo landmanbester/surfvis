@@ -3,12 +3,12 @@ type: log
 title: Wiki changelog
 description: Chronological record of what changed in the wiki and why.
 timestamp: 2026-10-16
-last_verified_commit: d4a40a0
+last_verified_commit: c57e964
 ---
 
 # Wiki changelog
 
-## 2026-11-05 — review fixes merged up from serve-ui
+## 2026-11-05 — review fixes merged up from serve-ui (verified at `c57e964`)
 
 - **Updated** `chi2-pipeline.md` (via serve-ui): `--nfreqs -1` is resolved per
   dataset. No canvas or flagging page changed.
