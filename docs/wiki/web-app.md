@@ -258,8 +258,8 @@ The selected cell keeps an outline (`.selected`) across heatmap re-renders.
 ## Manual flagging (write path)
 
 Design: issue #16. Source: `web/flagging.py`, the `/flag*` routes in `app.py`.
-The page has no selection tool yet (next: a canvas waterfall); the routes are
-driven by JSON.
+The canvas waterfall is in place, but it has no selection tool yet (step 3 of
+#16), so the routes are driven by JSON.
 
 - **Selections are polygons** in the waterfall's (time slot, channel) data
   coordinates; a rectangle is four vertices. `rasterise` selects a cell when
@@ -271,19 +271,40 @@ driven by JSON.
   correlations, dry_run}`. `correlations` is `product` (those the plotted
   product is formed from: XX and YY for I) or `all`. Rows are found with
   `msdata.baseline_rows` (arcae TaQL, shared with the flag-version reader) and
-  mapped to slots with `msdata.slot_index`. `FLAG_ROW` is set where a row
-  becomes fully flagged. 403 without `--allow-flagging`; 400 for an empty or
-  unformable selection; 422 for fewer than three vertices.
-- **Backup.** The first write of a session saves FLAG and FLAG_ROW as a CASA
-  flag version, `surfvis_before_<UTC>`, via `Table.from_descriptor` with the
+  mapped to slots with `msdata.slot_index`, in the antenna order the MS
+  stores (`msdata.stored_order`): a baseline stored both ways in one
+  partition is two baselines, and flagging one leaves the other. `FLAG_ROW`
+  is only ever set (`FLAG_ROW | all(FLAG)`); recomputing it as `all(FLAG)`
+  used to unflag rows flagged through FLAG_ROW alone. 403 without
+  `--allow-flagging`; 400 for an empty or unformable selection; 422 for
+  fewer than three vertices or a negative antenna index; 503 while the backup
+  is being written.
+- **xarray-ms mislabels reversed baselines.** A baseline stored as (2, 0) is
+  labelled (0, 2) by `baseline_antenna1/2_name`, but its data stay V_20,
+  unconjugated. So the waterfall and the flag writer take the antenna order
+  from the MS (`stored_order`), never from those labels: gains, cross-hand
+  labels and rows all follow the data.
+- **Backup.** Before any write, FLAG and FLAG_ROW are saved as a CASA flag
+  version, `surfvis_before_<UTC to the microsecond>` (seconds alone let two
+  sessions collide). `serve --allow-flagging` starts it in a background
+  thread at startup: copying the column takes minutes on a large MS (about
+  335 M cells/s, so ~50 min for 8 h of 32k-channel MeerKAT data), far too long
+  for one HTTP request. Writes answer 503 until it is done, `/flag/state`
+  reports `backup_state`, and a failed backup disables writing. `Flagger`
+  used directly takes it synchronously on the first write. It is written via `Table.from_descriptor` with the
   source's column descriptors, copied one `DATA_DESC_ID` run at a time in
   ~256 MB chunks. Keep arcae's `_c_order` hint in the descriptor: without it
   a tiled FLAG column's fixed cell shape is read transposed and the copy fails.
   TaQL `SELECT ... GIVING ... AS PLAIN` was rejected: it copies every subtable
   and labels the result a Measurement Set.
-- **Undo** (`POST /flag/undo`) restores the rows' previous FLAG and FLAG_ROW,
-  last edit first; 409 when empty. The stack is per process; the backup
-  version is the durable fallback. `GET /flag/state` lists the edits.
+- **Undo** (`POST /flag/undo`) clears exactly the cells the last edit turned
+  on, reading the rows as they are now, and recomputes FLAG_ROW only for rows
+  that edit flagged; 409 when empty. An edit records the changed cells'
+  indices, not row snapshots: snapshots both wiped later writes by
+  `flag-chi2`, CASA or another server, and cost ~59 MB per MeerKAT
+  baseline-scan. A write that fails half-way is put back before the error is
+  raised. The stack is per process; the backup version is the durable
+  fallback. `GET /flag/state` lists the edits.
 - After a write `msdata.invalidate(ms)` drops the caches, so the next
   waterfall shows the new flags even within one mtime tick. Writes go through
   a separate arcae handle in the same process as xarray-ms's read handle;
@@ -377,4 +398,17 @@ calls it after a write). An entry holds the plane as complex64 and the flags as
 bool, `values` is dropped: about 9 bytes per cell, so 450 x 32768 is ~130 MB and
 four entries ~0.5 GB. Colour limits are cached per quantity on the entry
 (`Waterfall.limits`), so colours do not move on zoom and are not recomputed.
+
+Concurrent misses for the same plane (two tabs, a quick double click) wait on
+a per-key lock for the first read rather than each reading the MS;
+`lru_cache` does not coalesce them. A miss still peaks at roughly 1-2 GB at
+MeerKAT scale while the plane is formed; the waterfall passes `weight=None`
+to `products.form`, so unit weights are a broadcast view rather than a
+float64 array per correlation.
+
+The widget registers its document-level listeners with one
+`AbortController` and tears them down (with its `ResizeObserver` and any
+in-flight fetch) on the `htmx:beforeSwap` that replaces the panel. Until the
+next keypress, an old panel used to stay reachable from a `keydown` listener,
+holding its blocks and offscreen canvas.
 `planes._binned` skips its padded copy when the window divides evenly.
