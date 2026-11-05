@@ -169,6 +169,12 @@ def form(
     v = {c: vis[..., k].astype(np.complex128) for k, c in enumerate(labels)}
     w = {c: weight[..., k].astype(np.float64) for k, c in enumerate(labels)}
     f = {c: flag[..., k].astype(bool) for k, c in enumerate(labels)}
+    # A weight that is not positive and finite carries no information. Flag it
+    # here, so a correlation product does not count it as a degree of freedom
+    # while a Stokes product formed from it (infinite variance) is flagged.
+    for c in labels:
+        with np.errstate(invalid="ignore"):
+            f[c] = f[c] | ~(np.isfinite(w[c]) & (w[c] > 0))
 
     if gains is not None:
         if ant1 is None or ant2 is None or tidx is None:
