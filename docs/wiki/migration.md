@@ -3,8 +3,8 @@ type: reference
 title: Migration from the optparse entry points
 description: Option-by-option mapping from the pre-hip-cargo surfvis/surfchi2/flagchi2 scripts to the single surfvis Typer app.
 tags: [migration, cli, breaking-changes]
-timestamp: 2026-09-18
-last_verified_commit: de24898
+timestamp: 2026-11-05
+last_verified_commit: 9bc6e7a
 ---
 
 # Migration from the optparse entry points
@@ -46,7 +46,7 @@ Python parameter name and does not support explicit `param_decls`.
 | `--doacorr` | `--doacorr` / `--no-doacorr` | As above. |
 | `--scale` | `--scale` | Defaults to `None` (scale to 5 sigma) rather than `-1`. `-1` is still accepted. |
 | `--cmap` | `--cmap` | — |
-| `-o`, `--opdir` | `--opdir` | Defaults to `None`, which still resolves to `<ms>_<datacolumn>__plots`. |
+| `-o`, `--opdir` | `--opdir` | Defaults to `None`, which now resolves to `<ms name>_<datacolumn>__plots` in the working directory, not beside the MS (unwritable in a container). |
 
 ## `surfchi2` → `surfvis chi2`
 
@@ -57,8 +57,8 @@ All long names unchanged: `--rcol`, `--wcol`, `--fcol`, `--dataout`,
 - `--use-corrs` is typed `List[int]` rather than a raw string, so the cab
   advertises the right dtype. The command line form (`--use-corrs 0,3`) is
   identical.
-- `--dataout`/`--imagesout` default to `None` rather than `''`; both still
-  resolve to `$CWD/chi2`.
+- `--imagesout` defaults to `None` rather than `''`, still resolving to
+  `$CWD/chi2`. `--dataout` is ignored until it is implemented.
 
 ## `flagchi2` → `surfvis flag-chi2`
 

@@ -3,10 +3,19 @@ type: log
 title: Wiki changelog
 description: Chronological record of what changed in the wiki and why.
 timestamp: 2026-11-05
-last_verified_commit: a3e6e5d
+last_verified_commit: 9bc6e7a
 ---
 
 # Wiki changelog
+
+## 2026-11-05 — review decisions on hipped (verified at `9bc6e7a`)
+
+- **Updated** `chi2-pipeline.md`: `flag-chi2` skips autocorrelations, flags a
+  non-finite chi-squared, drops `fastmath`, and only ever adds to `FLAG_ROW`
+  (and only when `--fcol` is `FLAG`); `--dataout` is ignored until
+  implemented.
+- **Updated** `migration.md`: `surf --opdir` defaults to the working
+  directory; `--dataout` is ignored.
 
 ## 2026-11-05 — review fixes to chi2 (verified at `a3e6e5d`)
 

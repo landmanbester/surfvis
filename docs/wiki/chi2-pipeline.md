@@ -4,7 +4,7 @@ title: Chi-squared pipeline
 description: How chi2 and flag-chi2 chunk a Measurement Set, what the numba kernels compute, how results are reduced, and where images land.
 tags: [chi2, flagging, dask, numba, daskms]
 timestamp: 2026-11-05
-last_verified_commit: a3e6e5d
+last_verified_commit: 9bc6e7a
 ---
 
 # Chi-squared pipeline
@@ -51,9 +51,10 @@ Output layout, rooted at `--imagesout` (default `$CWD/chi2`):
 <imagesout>/field<F>/spw<S>/scan<N>/combined.png         # per-scan reduction
 ```
 
-`--imagesout` and `--dataout` are both **deleted and recreated** on every run.
-`--dataout` is currently vestigial: the directory is removed but nothing is
-written to it — the zarr output it was named for was never implemented.
+`--imagesout` is **deleted and recreated** on every run. `--dataout` is
+declared but **not yet implemented**: it is ignored with a message (it used
+to delete the directory and write nothing). The zarr it is named for lands
+with `surfvis serve`.
 
 The `--nthreads` value does double duty: it sizes the process pool *and* the
 dask `ThreadPool` set via `dask.config`.
@@ -72,10 +73,14 @@ presents as an intermittent hang rather than a reliable one.
 Simpler: one pass over the MS chunked by `--nrows` rows and `--nfreqs`
 channels. `utils.chisq.flagchisq` wraps the numba kernel `_flagchisq` in a
 `da.blockwise`. A visibility whose chi-squared exceeds `--flag-above`, **or is
-exactly zero**, flags the whole `(row, chan)` cell across every correlation.
-Baselines touching any antenna in `--respect-ants` are skipped entirely.
+exactly zero, or is not finite**, flags the whole `(row, chan)` cell across
+every correlation. Autocorrelations, and baselines touching any antenna in
+`--respect-ants`, are skipped entirely. The kernel is compiled without
+`fastmath`, which would let numba assume NaN and inf away.
 
-`FLAG_ROW` is recomputed as `all(flag)` over `(chan, corr)` and both columns are
+Flags are only ever added. When `--fcol` is `FLAG`, `FLAG_ROW` becomes
+`FLAG_ROW | all(flag)` over `(chan, corr)`, so a row flagged beforehand stays
+flagged; for any other `--fcol`, `FLAG_ROW` is left alone. The columns are
 written back with `xds_to_storage_table`. This **modifies the input MS**, which
 is why the cab marks `ms` as `writable: true`.
 
@@ -85,7 +90,7 @@ is why the cab marks `ms` as `writable: true`.
 |---|---|---|
 | `_surfchisq_slice` | `@njit(nogil=True)` | `(nant, nant)` chi2 and counts for one already-sliced chunk. The one the pipeline actually uses. |
 | `_surfchisq` / `surfchisq` | `@njit` + `da.blockwise` | Whole-array variant producing `(t, f, corr, p, q, 2)`. Retained from the original codebase but **not called** by any command. |
-| `_flagchisq` / `flagchisq` | `@njit(fastmath=True)` + `da.blockwise` | Mutates and returns the flag array. |
+| `_flagchisq` / `flagchisq` | `@njit` + `da.blockwise` | Mutates and returns the flag array. |
 
 All of them fill both triangles (`out[q, p] = out[p, q]`), so the resulting
 matrices are symmetric.
