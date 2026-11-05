@@ -2,13 +2,13 @@
 type: log
 title: Wiki changelog
 description: Chronological record of what changed in the wiki and why.
-timestamp: 2026-10-16
-last_verified_commit: c57e964
+timestamp: 2026-11-05
+last_verified_commit: 02a50cf
 ---
 
 # Wiki changelog
 
-## 2026-11-05 — review decisions merged up from serve-ui (verified at `HEADSHA`)
+## 2026-11-05 — review decisions merged up from serve-ui (verified at `02a50cf`)
 
 - **Updated** `chi2-pipeline.md` and `migration.md`, via serve-ui: hipped's
   `flag-chi2` fixes and the `surf --opdir` default.
