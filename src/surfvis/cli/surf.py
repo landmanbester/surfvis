@@ -22,7 +22,7 @@ MS = NewType("MS", Path)
 @stimela_output(
     dtype="Directory",
     name="opdir",
-    info="Output folder to store plots. Defaults to <ms>_<datacolumn>__plots.",
+    info="Output folder to store plots. Defaults to <ms name>_<datacolumn>__plots in the working directory.",
     metadata={"rich_help_panel": "Outputs"},
 )
 def surf(
@@ -112,7 +112,7 @@ def surf(
         Directory | None,
         typer.Option(
             parser=parse_upath,
-            help="Output folder to store plots. Defaults to <ms>_<datacolumn>__plots.",
+            help="Output folder to store plots. Defaults to <ms name>_<datacolumn>__plots in the working directory.",
             rich_help_panel="Outputs",
         ),
     ] = None,

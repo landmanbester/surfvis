@@ -93,6 +93,6 @@ cabs:
         dtype: Directory
         info:
           Output folder to store plots.
-          Defaults to <ms>_<datacolumn>__plots.
+          Defaults to <ms name>_<datacolumn>__plots in the working directory.
         metadata:
           rich_help_panel: Outputs

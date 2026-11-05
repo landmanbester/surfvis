@@ -43,7 +43,8 @@ def surf(
             ``None`` (or ``-1``) scales the image max to 5 sigma. Ignored for
             phase plots.
         cmap: Matplotlib colour map.
-        opdir: Output folder. Defaults to ``<ms>_<datacolumn>__plots``.
+        opdir: Output folder. Defaults to ``<ms name>_<datacolumn>__plots`` in
+            the working directory.
     """
     # -1 is the legacy "unset" sentinel for these three; keep honouring it.
     ant1 = -1 if i is None else i
@@ -71,8 +72,10 @@ def surf(
     usedants = np.unique(tt.getcol("ANTENNA1"))
 
     # Create output folder if it doesn't exist
+    # The working directory, not beside the MS: in a container, or under
+    # Stimela, the MS's parent is often read-only.
     if opdir is None:
-        foldername = Path(f"{msname}_{datacolumn}__plots")
+        foldername = Path.cwd() / f"{Path(msname).name}_{datacolumn}__plots"
     else:
         foldername = Path(str(opdir))
     if foldername.is_dir():
