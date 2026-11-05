@@ -533,6 +533,44 @@ def test_waterfall_forms_the_corrected_residual(chi2_zarr, gain_table, quantity)
 
 
 @needs_web
+def test_gains_follow_the_stored_order_not_xarray_ms_labels(chi2_zarr, gain_table, tmp_path):
+    """xarray-ms labels a baseline stored as (6, 2) as (2, 6) without conjugating it.
+
+    The data are V_62, so the correction is inv(g_6) V inv(g_2)^H, whichever
+    order the cell asked for and whatever xarray-ms calls it.
+    """
+    import shutil
+
+    from casacore.tables import table
+
+    from surfvis.web import msdata
+
+    info = chi2_zarr["ms"]
+    names = info["antenna_names"]
+    ms = str(tmp_path / "reversed.ms")
+    shutil.copytree(info["path"], ms)
+    with table(ms, readonly=False, ack=False) as t:
+        a1, a2 = t.getcol("ANTENNA1"), t.getcol("ANTENNA2")
+        bl = np.flatnonzero((a1 == 2) & (a2 == 6))
+        a1[bl], a2[bl] = 6, 2
+        t.putcol("ANTENNA1", a1)
+        t.putcol("ANTENNA2", a2)
+        scan = t.getcol("SCAN_NUMBER")[bl]
+        data = t.getcol("DATA")[bl][scan == 2][..., 0]
+        model = t.getcol("MODEL_DATA")[bl][scan == 2][..., 0]
+
+    g = info["gains"][info["ntime"] :]
+    want = data / (g[:, :, 6, 0] * np.conj(g[:, :, 2, 0])) - model
+    for request in ((names[2], names[6]), (names[6], names[2])):
+        parts = [
+            msdata.waterfall(ms, 0, 0, 2, *request, "XX", "DATA", q, model="MODEL_DATA", gtable=gain_table)
+            for q in ("real", "imag")
+        ]
+        np.testing.assert_allclose(parts[0].values + 1j * parts[1].values, want, atol=1e-4)
+        assert (parts[0].antenna1, parts[0].antenna2) == (names[6], names[2])
+
+
+@needs_web
 def test_stokes_waterfall_combines_correlations(chi2_zarr):
     from surfvis.web import msdata
 

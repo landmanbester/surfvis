@@ -22,15 +22,15 @@ MARKERS = {"needs_ms", "needs_web"}
 # module -> (total test functions, of which need a Measurement Set)
 EXPECTED = {
     "test_commands.py": (10, 10),
-    "test_flagging.py": (7, 7),
+    "test_flagging.py": (13, 13),
     "test_install.py": (2, 0),
-    "test_planes.py": (8, 0),
+    "test_planes.py": (9, 0),
     "test_products.py": (9, 0),
     "test_js.py": (1, 0),
     "test_rasterise.py": (6, 0),
     "test_roundtrip.py": (4, 0),
     "test_suite_integrity.py": (3, 0),
-    "test_web.py": (33, 33),
+    "test_web.py": (34, 34),
 }
 
 

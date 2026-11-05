@@ -99,3 +99,22 @@ def test_encode_round_trips_and_rejects_nan_headers():
     np.testing.assert_array_equal(flags, b.flags)
     with pytest.raises(ValueError):
         planes.encode({"vmin": float("nan")}, b)
+
+
+def _golden() -> bytes:
+    """The block ``tests/js/golden.bin`` holds: odd header length (padding), non-ASCII, NaN value."""
+    values = np.array([[1.5, -2.25, np.nan], [0.0, 3.0e6, -1e-7]], dtype=np.float32)
+    flags = np.array([[0, 255, 128], [1, 0, 254]], dtype=np.uint8)
+    block = planes.Block(values, flags, 0, 2, 0, 3, 1, 1)
+    return planes.encode({"title": "m000-m002 χ²", "vmin": -2.25, "vmax": 3.0e6, "odd": "x"}, block)
+
+
+def test_encoder_matches_the_golden_block_the_js_decoder_reads():
+    """tests/js/golden.test.mjs decodes this same file, so Python and JS cannot drift apart.
+
+    Regenerate after a deliberate format change with
+    ``python -c "from tests.test_planes import _golden; open('tests/js/golden.bin','wb').write(_golden())"``.
+    """
+    from pathlib import Path
+
+    assert (Path(__file__).parent / "js" / "golden.bin").read_bytes() == _golden()
