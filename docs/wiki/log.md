@@ -8,6 +8,11 @@ last_verified_commit: d4a40a0
 
 # Wiki changelog
 
+## 2026-11-05 — review fixes merged up from serve-ui
+
+- **Updated** `chi2-pipeline.md` (via serve-ui): `--nfreqs -1` is resolved per
+  dataset. No canvas or flagging page changed.
+
 ## 2026-10-16 — plane cache and widget fixes (verified at `d4a40a0`)
 
 - **Updated** `web-app.md`: "Plane cache" section (key, memory, colour limits),

@@ -98,11 +98,11 @@ def chi2(
         row_chunks = [np.sum(counts[i : i + utpc]) for i in range(0, ut.size, utpc)]
 
         nchan = ds.chan.size
-        if nfreqs in [0, -1]:
-            nfreqs = nchan
+        # Per dataset: rebinding nfreqs would carry the first SPW's width into the rest.
+        nf = nchan if nfreqs in [0, -1] else nfreqs
 
         # list per ds
-        chunks.append({"row": tuple(row_chunks), "chan": nfreqs})
+        chunks.append({"row": tuple(row_chunks), "chan": nf})
 
         ridx = np.zeros(len(row_chunks))
         ridx[1:] = np.cumsum(row_chunks)[0:-1]
@@ -115,7 +115,7 @@ def chi2(
         tidx2 = np.append(tidx, ntime)
         tbin_counts.append(tidx2[1:] - tidx2[0:-1])
 
-        fidx = np.arange(0, nchan, nfreqs)
+        fidx = np.arange(0, nchan, nf)
         fbin_idx.append(fidx)
         fidx2 = np.append(fidx, nchan)
         fbin_counts.append(fidx2[1:] - fidx2[0:-1])

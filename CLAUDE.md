@@ -49,7 +49,7 @@ docker run --rm --user "$(id -u):$(id -g)" -e HOME=/tmp -v "$PWD":/src -w /src \
    PYTHONPATH=/tmp/t:/src/src:/src /tmp/t/bin/pytest tests/ -q -W ignore"
 ```
 
-That is the only way to run the full suite (73 tests; the node one skips in the container). **CI does not run them** —
+That is the only way to run the full suite (76 tests; the node one skips in the container). **CI does not run them** —
 `.github/workflows/ci.yml` installs the lightweight package only, deliberately,
 since python-casacore and numba make CI slow and brittle. Verify locally.
 
@@ -208,8 +208,8 @@ as `uint8`, and `getcol(index=...)` rejects read-only row arrays -- copy
 indices that came out of another `getcol`.
 
 **A green test run proves less than it looks.** The heavy modules skip at
-*import*, so pytest reports one skip per module: a lightweight run says
-"9 passed, 3 skipped" while 35 tests did not run.
+*import*, so pytest reports one skip per module: a lightweight run reports a
+handful of passes and skips while most of the suite did not run.
 `tests/test_suite_integrity.py` pins the per-module test counts statically so a
 deletion fails loudly; update those counts deliberately when adding or removing
 a test.

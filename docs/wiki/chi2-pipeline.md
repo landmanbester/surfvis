@@ -3,8 +3,8 @@ type: reference
 title: Chi-squared pipeline
 description: How chi2 and flag-chi2 chunk a Measurement Set, what the numba kernels compute, how results are reduced, and where images land.
 tags: [chi2, flagging, dask, numba, daskms]
-timestamp: 2026-10-15
-last_verified_commit: 1dbfc61
+timestamp: 2026-11-05
+last_verified_commit: 853555a
 ---
 
 # Chi-squared pipeline
@@ -52,6 +52,8 @@ table are flagged.
    `(FIELD_ID, DATA_DESC_ID, SCAN_NUMBER)`, to derive the chunking. `--ntimes`
    unique times per chunk (default: all of them) and `--nfreqs` channels per
    chunk (default 128) give the row/time/frequency bin indices and counts.
+   `--nfreqs -1` means each dataset's own channel count, worked out per
+   dataset (it used to leak the first SPW's width into the rest).
 2. **Pass two** re-opens the MS with those chunks and the residual, weight,
    flag, optional model, `ANTENNA1`, `ANTENNA2` and `TIME` columns, keeping
    only the correlations the requested products need (all four for full-Jones
