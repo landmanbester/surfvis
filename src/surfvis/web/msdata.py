@@ -469,6 +469,13 @@ def waterfall(
         if name is not None and name not in ds.data_vars:
             raise KeyError(f"Column {name!r} not in this Measurement Set. Have: {sorted(ds.data_vars)}")
 
+    # Plot the baseline the way the MS stores it. The grid is symmetric, so a
+    # click can ask for (q, p); the row read is (p, q), and gains, cross-hand
+    # labels and the title must all follow the row, not the request.
+    k = baseline_index(ds, name1, name2)
+    if str(ds.baseline_antenna1_name.values[k]) != name1:
+        name1, name2 = name2, name1
+
     labels_ = [str(p) for p in ds.polarization.values]
     gains = None
     ant1 = ant2 = None
@@ -480,7 +487,6 @@ def waterfall(
     read = products.needed([product], labels_, full_jones=gains is not None and gains.full)
     corr_idx = [labels_.index(c) for c in read]
 
-    k = baseline_index(ds, name1, name2)
     sel = {"baseline_id": k, "polarization": corr_idx}
     vis = ds[resolved].isel(sel).values
     mvis = ds[group.resolve(model)].isel(sel).values if model else None
