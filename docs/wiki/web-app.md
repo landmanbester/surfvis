@@ -3,8 +3,8 @@ type: reference
 title: Chi-squared browser
 description: How surfvis serve links surfchi2 output to on-demand baseline waterfalls, the waterfall's correction / Stokes / flag-version controls, and the xarray-ms facts it depends on.
 tags: [web, fastapi, htmx, xarray-ms, zarr]
-timestamp: 2026-10-16
-last_verified_commit: d4a40a0
+timestamp: 2026-11-05
+last_verified_commit: 023dc05
 ---
 
 # Chi-squared browser

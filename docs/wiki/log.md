@@ -3,12 +3,12 @@ type: log
 title: Wiki changelog
 description: Chronological record of what changed in the wiki and why.
 timestamp: 2026-11-05
-last_verified_commit: 02a50cf
+last_verified_commit: 023dc05
 ---
 
 # Wiki changelog
 
-## 2026-11-05 — serve-ui review fixes merged up (verified at `HEADSHA`)
+## 2026-11-05 — serve-ui review fixes merged up (verified at `023dc05`)
 
 - **Updated** `web-app.md` and `chi2-pipeline.md`, via serve-ui: antenna order
   of reversed cells (which the canvas plane and `/waterfall.bin` share), the
