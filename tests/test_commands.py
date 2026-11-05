@@ -1,4 +1,4 @@
-"""Smoke tests for the plotting and flagging commands.
+"""Smoke tests for the plotting, chi-squared and flagging commands.
 
 Neither had any coverage: `test_roundtrip.py` only proves the CLI and the cab
 agree, which says nothing about whether the command runs. These exercise the
@@ -76,7 +76,9 @@ def test_flag_chi2_flags_the_bad_baseline_in_place(tiny_ms, tmp_path):
     p, q = tiny_ms["hot"]
     hot_rows = (ant1 == p) & (ant2 == q)
     assert after[hot_rows].all(), "every hot-baseline visibility should be flagged"
-    assert not after[~hot_rows].all(), "quiet baselines should not be wholly flagged"
+    # Noise alone flags ~16% at this threshold on the fixture; a kernel that
+    # flagged most good data must fail here, not just one that flagged all of it.
+    assert after[~hot_rows].mean() < 0.25, "quiet baselines should stay mostly unflagged"
     assert flag_row[hot_rows].all(), "FLAG_ROW follows FLAG"
 
 
@@ -99,3 +101,50 @@ def test_flag_chi2_respects_protected_antennas(tiny_ms, tmp_path):
 
     touching = (ant1 == p) | (ant2 == p)
     assert not after[touching].any(), "protected antenna's baselines must be untouched"
+
+
+@needs_ms
+def test_chi2_writes_per_correlation_and_combined_images(tiny_ms, tmp_path):
+    """One image per (time bin, freq bin, correlation) and one per scan, through the spawn pool.
+
+    Each correlation's image is computed from that correlation alone: the old
+    code gave every correlation's task all of them, so c0 and c1 were identical.
+    """
+    import matplotlib.pyplot as plt
+
+    from surfvis.core.chi2 import chi2
+
+    out = tmp_path / "imgs"
+    chi2(tiny_ms["path"], imagesout=out, dataout=tmp_path / "zarr", nthreads=2)
+
+    for scan in range(1, tiny_ms["nscan"] + 1):
+        scandir = out / "field0" / "spw0" / f"scan{scan}"
+        assert (scandir / "combined.png").stat().st_size > 0
+        # Default chunking: one time bin, one freq bin (nfreqs=128 > 32 channels), XX and YY.
+        assert sorted(p.name for p in scandir.glob("t*.png")) == ["t0_f0_c0.png", "t0_f0_c1.png"]
+        # Compare the plotted pixels, not the bytes: the titles ("corr 0" vs
+        # "corr 1") differ even when the data are identical.
+        c0, c1 = (plt.imread(scandir / f"t0_f0_c{c}.png") for c in (0, 1))
+        top = c0.shape[0] // 8
+        assert not np.array_equal(c0[top:], c1[top:]), "per-correlation images hold the same data"
+
+
+@needs_ms
+def test_chi2_survives_an_antenna_missing_from_part_of_a_scan(tiny_ms, tmp_path):
+    """Chunks that lack the highest antenna still add into the per-scan totals."""
+    from casacore.tables import table
+
+    from surfvis.core.chi2 import chi2
+
+    ms = tmp_path / "gappy.ms"
+    shutil.copytree(tiny_ms["path"], ms)
+    last = tiny_ms["nant"] - 1
+    with table(str(ms), readonly=False, ack=False) as t:
+        ant1, ant2, scan, time = t.getcol("ANTENNA1"), t.getcol("ANTENNA2"), t.getcol("SCAN_NUMBER"), t.getcol("TIME")
+        late = time > np.unique(time[scan == 1])[tiny_ms["ntime"] // 2 - 1]
+        t.removerows(np.flatnonzero((scan == 1) & late & ((ant1 == last) | (ant2 == last))))
+
+    out = tmp_path / "imgs"
+    chi2(ms, imagesout=out, dataout=tmp_path / "zarr", nthreads=2, ntimes=3)
+
+    assert (out / "field0" / "spw0" / "scan1" / "combined.png").stat().st_size > 0

@@ -9,6 +9,7 @@ from pathlib import Path
 import dask
 import numpy as np
 from daskms import xds_from_storage_ms as xds_from_ms
+from daskms import xds_from_storage_table as xds_from_table
 
 from surfvis.utils.plotting import makeplot, surfchisq_plot
 
@@ -79,11 +80,11 @@ def chi2(
         row_chunks = [np.sum(counts[i : i + utpc]) for i in range(0, ut.size, utpc)]
 
         nchan = ds.chan.size
-        if nfreqs in [0, -1]:
-            nfreqs = nchan
+        # Per dataset: rebinding nfreqs would carry the first SPW's width into the rest.
+        nf = nchan if nfreqs in [0, -1] else nfreqs
 
         # list per ds
-        chunks.append({"row": tuple(row_chunks), "chan": nfreqs})
+        chunks.append({"row": tuple(row_chunks), "chan": nf})
 
         ridx = np.zeros(len(row_chunks))
         ridx[1:] = np.cumsum(row_chunks)[0:-1]
@@ -96,7 +97,7 @@ def chi2(
         tidx2 = np.append(tidx, ntime)
         tbin_counts.append(tidx2[1:] - tidx2[0:-1])
 
-        fidx = np.arange(0, nchan, nfreqs)
+        fidx = np.arange(0, nchan, nf)
         fbin_idx.append(fidx)
         fidx2 = np.append(fidx, nchan)
         fbin_counts.append(fidx2[1:] - fidx2[0:-1])
@@ -114,6 +115,11 @@ def chi2(
         group_cols=["FIELD_ID", "DATA_DESC_ID", "SCAN_NUMBER"],
         table_schema=schema,
     )
+
+    # Every antenna in the MS, not the highest one seen in some chunk: an
+    # antenna absent from part of a scan would otherwise size the accumulators
+    # differently from the chunks added to them.
+    nant = len(xds_from_table(f"{msname}::ANTENNA")[0].NAME)
 
     if not use_corrs:
         print("Using only diagonal correlations")
@@ -151,7 +157,8 @@ def chi2(
                         row0 = rbin_idx[i][t]
                         rowf = rbin_idx[i][t] + rbin_counts[i][t]
                         dso = ds[{"row": slice(row0, rowf), "chan": slice(chan0, chanf)}]
-                        dso = dso.sel(corr=corrs)
+                        # This correlation only. isel, since corrs holds positions (-1 = last).
+                        dso = dso.isel(corr=[corrs[c]])
                         resid = dso.get(rcol).data
                         if wcol == "SIGMA_SPECTRUM":
                             weight = 1.0 / dso.get(wcol).data ** 2
@@ -176,7 +183,6 @@ def chi2(
                         futures.append(fut)
 
             # to reduce over time, freq and corr at the end
-            nant = np.maximum(ant1.compute().max(), ant2.compute().max()) + 1
             chi2s[f"field{field}_spw{spw}_scan{scan}"] = np.zeros((nant, nant), dtype=float)
             counts[f"field{field}_spw{spw}_scan{scan}"] = np.zeros((nant, nant), dtype=float)
             print(f"Submitted field{field}_spw{spw}_scan{scan}")
@@ -188,8 +194,10 @@ def chi2(
             num_completed += 1
             print(f"\rProcessing: {num_completed}/{num_futures}", end="", flush=True)
             field, spw, scan, chi2_chunk, count = fut.result()
-            chi2s[f"field{field}_spw{spw}_scan{scan}"] += chi2_chunk
-            counts[f"field{field}_spw{spw}_scan{scan}"] += count
+            # A chunk only spans the antennas present in it; pad into the full grid.
+            na = chi2_chunk.shape[-1]
+            chi2s[f"field{field}_spw{spw}_scan{scan}"][:na, :na] += chi2_chunk
+            counts[f"field{field}_spw{spw}_scan{scan}"][:na, :na] += count
 
     # LB - is it worth doing this in parallel?
     print("Plotting per scan")

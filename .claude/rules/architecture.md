@@ -169,7 +169,9 @@ backends.
 ## 4. Cab Generation is Automatic
 
 **The `src/surfvis/cabs/*.yml` files are generated artefacts. Never edit
-them by hand and never run `hip-cargo generate-cabs` manually.**
+them by hand.** Regenerate them with `hip-cargo generate-cabs` instead:
+running it by hand is part of the CLI regeneration loop
+(`docs/wiki/cli-contract.md`) and is harmless, since it is deterministic.
 
 Three automated paths keep them in sync with `cli/*.py`:
 
