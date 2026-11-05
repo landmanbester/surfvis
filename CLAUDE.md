@@ -247,6 +247,20 @@ on the server by cell centre and even-odd; writes need `serve
 keep an undo stack. Next is a canvas-drawn waterfall with polygon and
 drag-rectangle selection. Any new write to the MS goes through `Flagger`.
 
+## Agent skills
+
+### Issue tracker
+
+GitHub Issues on the fork `landmanbester/surfvis` (`origin`), via `gh`; `ratt-ru/surfvis` is `upstream`. See `docs/agents/issue-tracker.md`.
+
+### Triage labels
+
+The five defaults: needs-triage, needs-info, ready-for-agent, ready-for-human, wontfix. See `docs/agents/triage-labels.md`.
+
+### Domain docs
+
+Single-context: `GLOSSARY.md` and `docs/adr/` at the repo root (created lazily), alongside the canonical `docs/wiki/`. See `docs/agents/domain.md`.
+
 ## LLM wiki
 
 `docs/wiki/` is the canonical reference for what is implemented; start at
