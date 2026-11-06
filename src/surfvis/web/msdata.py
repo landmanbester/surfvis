@@ -14,7 +14,11 @@ surfchi2 works on plottable.
 """
 
 import os
+import sys
 import threading
+import time
+from concurrent.futures import ThreadPoolExecutor
+from contextlib import contextmanager
 from dataclasses import dataclass, field, replace
 from functools import lru_cache
 
@@ -24,6 +28,7 @@ import xarray
 from surfvis.utils import gains as gains_mod
 from surfvis.utils import products
 from surfvis.utils.msv4 import ignore_xarray_ms_warnings
+from surfvis.web import profiling
 from surfvis.web.profiling import span, timed
 
 ignore_xarray_ms_warnings()
@@ -41,6 +46,39 @@ MJD_UNIX_OFFSET = 3506716800.0
 
 # Last-seen on-disk signature per MS, so a rewrite invalidates the caches.
 _FINGERPRINTS: dict[str, tuple] = {}
+
+
+class _Coalescer:
+    """One lock per cache key, so concurrent misses wait for the first read instead of repeating it.
+
+    ``lru_cache`` does not coalesce: two threads missing on one key both do the
+    work. Here that is a request and the background warm-up both opening a
+    scan, which on a large MS is half a minute each.
+    """
+
+    def __init__(self) -> None:
+        self._locks: dict[tuple, threading.Lock] = {}
+        self._guard = threading.Lock()
+
+    @contextmanager
+    def hold(self, key: tuple, what: str):
+        """Hold ``key``'s lock; a wait for it shows up in the profile as ``what: wait``."""
+        with self._guard:
+            if len(self._locks) > 1024:  # one per key ever asked for; drop the idle ones
+                for stale in [k for k, v in self._locks.items() if not v.locked()]:
+                    del self._locks[stale]
+            lock = self._locks.setdefault(key, threading.Lock())
+        if not lock.acquire(blocking=False):
+            with span(f"{what}: wait"):
+                lock.acquire()
+        try:
+            yield
+        finally:
+            lock.release()
+
+
+_OPENING = _Coalescer()
+_SCANNING = _Coalescer()
 
 
 @dataclass(frozen=True)
@@ -198,7 +236,8 @@ def _open(ms: str, field: int, spw: int, scan: int) -> xarray.Dataset:
         _open_partition.cache_clear()
         _release_cached_tables()
         _FINGERPRINTS[ms] = fingerprint
-    return _open_partition(ms, field, spw, scan, fingerprint)
+    with _OPENING.hold((ms, field, spw, scan), "open_partition"):
+        return _open_partition(ms, field, spw, scan, fingerprint)
 
 
 @timed("available_columns")
@@ -308,6 +347,72 @@ def ms_times(ds: xarray.Dataset) -> np.ndarray:
     return times
 
 
+@dataclass(frozen=True)
+class ScanRows:
+    """Every main-table row of one (field, spw, scan): its antennas, row number and TIME."""
+
+    antenna1: np.ndarray
+    antenna2: np.ndarray
+    rows: np.ndarray
+    times: np.ndarray
+
+
+@lru_cache(maxsize=8)
+def _antenna_ids(ms: str, stamp: tuple) -> dict[str, int]:
+    import arcae
+
+    ant = arcae.table(f"{ms}::ANTENNA")
+    try:
+        return {str(n): k for k, n in enumerate(ant.getcol("NAME"))}
+    finally:
+        ant.close()
+
+
+@lru_cache(maxsize=8)
+@timed("scan_rows: query")
+def _query_scan_rows(ms: str, field: int, spw: int, scan: int, stamp: tuple) -> ScanRows:
+    """One TaQL pass over the main table for a whole scan. ``stamp`` only keys the cache."""
+    from arcae.lib.arrow_tables import Table
+
+    sel = Table.from_taql(
+        f"SELECT ROWID() AS ROW, TIME, ANTENNA1, ANTENNA2 FROM '{ms}' "
+        f"WHERE FIELD_ID=={field} && DATA_DESC_ID=={spw} && SCAN_NUMBER=={scan}"
+    )
+    try:
+        if not sel.nrow():
+            empty = np.zeros(0, np.int32)
+            return ScanRows(empty, empty, np.zeros(0, np.int64), np.zeros(0))
+        return ScanRows(
+            antenna1=np.asarray(sel.getcol("ANTENNA1"), dtype=np.int32),
+            antenna2=np.asarray(sel.getcol("ANTENNA2"), dtype=np.int32),
+            rows=np.array(sel.getcol("ROW"), dtype=np.int64),
+            times=np.asarray(sel.getcol("TIME"), dtype=float),
+        )
+    finally:
+        sel.close()
+
+
+def _layout_stamp(ms: str) -> tuple:
+    """Changes when rows are added or removed (``table.dat``), not when FLAG is written.
+
+    Flag edits rewrite the ``table.f*`` storage files that :func:`_fingerprint`
+    watches; they leave the row layout alone, so the scan's rows stay cached
+    across them.
+    """
+    try:
+        stat = os.stat(os.path.join(ms, "table.dat"))
+    except OSError:
+        return ()
+    return (stat.st_mtime_ns, stat.st_size)
+
+
+def scan_rows(ms: str, field: int, spw: int, scan: int) -> ScanRows:
+    """Every row of a scan, read once and cached; see :class:`ScanRows`."""
+    stamp = _layout_stamp(ms)
+    with _SCANNING.hold((ms, field, spw, scan), "scan_rows"):
+        return _query_scan_rows(ms, field, spw, scan, stamp)
+
+
 @timed("baseline_rows")
 def baseline_rows(ms: str, field: int, spw: int, scan: int, name1: str, name2: str) -> tuple[np.ndarray, np.ndarray]:
     """Main-table row numbers and TIME values (MJD seconds) of one baseline in one partition.
@@ -315,30 +420,16 @@ def baseline_rows(ms: str, field: int, spw: int, scan: int, name1: str, name2: s
     Only the given antenna order matches: pass the order the MS stores the
     baseline in, as the waterfall shows it. A baseline stored both ways in one
     partition is two baselines to xarray-ms, and flagging one must not touch
-    the other. Read with an arcae TaQL query, so the web
-    layer needs no python-casacore. The row array is a writable copy: arcae
-    rejects read-only buffers as row indices.
+    the other. Selected from :func:`scan_rows`, so a query over the main table
+    runs once per scan rather than per baseline (on a 10 M-row MS each query
+    took 7 s). The row array is a writable copy: arcae rejects read-only
+    buffers as row indices.
     """
-    import arcae
-    from arcae.lib.arrow_tables import Table
-
-    ant = arcae.table(f"{ms}::ANTENNA")
-    try:
-        ids = {str(n): k for k, n in enumerate(ant.getcol("NAME"))}
-    finally:
-        ant.close()
+    ids = _antenna_ids(ms, _layout_stamp(ms))
     a, b = ids[name1], ids[name2]
-
-    sel = Table.from_taql(
-        f"SELECT ROWID() AS ROW, TIME FROM '{ms}' WHERE FIELD_ID=={field} && DATA_DESC_ID=={spw} && "
-        f"SCAN_NUMBER=={scan} && ANTENNA1=={a} && ANTENNA2=={b}"
-    )
-    try:
-        if not sel.nrow():
-            return np.zeros(0, np.int64), np.zeros(0)
-        return np.array(sel.getcol("ROW"), dtype=np.int64), np.asarray(sel.getcol("TIME"), dtype=float)
-    finally:
-        sel.close()
+    scan_ = scan_rows(ms, field, spw, scan)
+    hit = (scan_.antenna1 == a) & (scan_.antenna2 == b)
+    return scan_.rows[hit].copy(), scan_.times[hit]
 
 
 def stored_order(ms: str, field: int, spw: int, scan: int, name1: str, name2: str) -> tuple[str, str]:
@@ -378,6 +469,53 @@ def invalidate(ms: str) -> None:
     _open_partition.cache_clear()
     _cached_plane.cache_clear()
     _release_cached_tables()
+    # Not _query_scan_rows: a FLAG write leaves the row layout alone, and
+    # _layout_stamp catches anything that does not.
+
+
+# Warming a scan in the background while its heatmap is on screen. One worker:
+# flicking through scans must not start a read per scan, so a queued warm-up
+# that is no longer the latest request is skipped.
+_WARMER = ThreadPoolExecutor(max_workers=1, thread_name_prefix="surfvis-warm")
+_WARM_GUARD = threading.Lock()
+_WARM_WANTED: tuple | None = None
+
+
+def warm(ms: str, field: int, spw: int, scan: int):
+    """Open a scan and read its rows in the background, ready for its first waterfall.
+
+    Returns:
+        The :class:`concurrent.futures.Future` of the warm-up (tests wait on it).
+    """
+    global _WARM_WANTED
+    key = (ms, field, spw, scan)
+    with _WARM_GUARD:
+        _WARM_WANTED = key
+    return _WARMER.submit(_warm, key)
+
+
+def _warm(key: tuple) -> bool:
+    """Run one warm-up, unless a newer one has been asked for. Never raises: nobody is waiting."""
+    with _WARM_GUARD:
+        if key != _WARM_WANTED:
+            return False
+    ms, field, spw, scan = key
+    try:
+        start = time.perf_counter()
+        _open(*key)
+        opened = time.perf_counter()
+        scan_rows(*key)
+        if profiling.enabled():
+            print(
+                f"[profile] warmed field {field} spw {spw} scan {scan}: open {opened - start:.3f} s, "
+                f"rows {time.perf_counter() - opened:.3f} s",
+                file=sys.stderr,
+                flush=True,
+            )
+        return True
+    except Exception as exc:  # noqa: BLE001 - the request that needs it will raise properly
+        print(f"surfvis: warming scan {scan} failed: {exc}", file=sys.stderr, flush=True)
+        return False
 
 
 @timed("version_flags")
@@ -642,16 +780,7 @@ def cached_plane(
     ``plane``; ``rect`` is None.
     """
     key = (ms, field, spw, scan, name1, name2, product, column, model, gtable, flagversion)
-    with _PLANE_LOCKS_GUARD:
-        if len(_PLANE_LOCKS) > 1024:  # one per plane ever asked for; drop the idle ones
-            for stale in [k for k, v in _PLANE_LOCKS.items() if not v.locked()]:
-                del _PLANE_LOCKS[stale]
-        lock = _PLANE_LOCKS.setdefault(key, threading.Lock())
-    # Concurrent misses for one plane wait for the first read instead of each
-    # reading the MS (lru_cache does not coalesce them).
-    with span("cached_plane: wait for lock"):
-        lock.acquire()
-    try:
+    with _PLANES.hold(key, "cached_plane"):
         return _cached_plane(
             ms,
             field,
@@ -667,12 +796,9 @@ def cached_plane(
             _fingerprint(ms),
             _gtable_stamp(gtable),
         )
-    finally:
-        lock.release()
 
 
-_PLANE_LOCKS: dict[tuple, threading.Lock] = {}
-_PLANE_LOCKS_GUARD = threading.Lock()
+_PLANES = _Coalescer()
 
 
 @lru_cache(maxsize=4)

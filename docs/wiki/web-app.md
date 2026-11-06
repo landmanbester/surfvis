@@ -352,6 +352,33 @@ First finding, on com08: the first `/waterfall` hung for over ten minutes in
 `data_group` → `open_datatree` (see "xarray-ms facts" above), and opened it
 twice. Fixed by not opening the datatree at all.
 
+Second round, same MS (10.9 M rows, 64 antennas, 9 secondary columns):
+
+| Cost | Where | Now |
+|---|---|---|
+| 4.6 s per heatmap | `render.cell_colours` called the matplotlib norm per cell, through numpy masked arrays | one vectorised call; a test pins it matches `to_hex(cmap(norm(v)))` cell for cell |
+| 7.5 s x 2 per waterfall | `baseline_rows` ran a TaQL query over the whole main table, twice when the click was in the unstored order | `scan_rows()` reads (ANTENNA1, ANTENNA2, ROWID, TIME) for the scan once; `baseline_rows` selects from it |
+| 37 s per scan | `open_partition`: 22.6 s building xarray-ms's structure (once per MS; 15 s of it partitioning the rows), 14.4 s `secondary_variables` row-shape `np.unique` per column (every scan) | hidden: `/heatmap` warms its scan in the background |
+
+**Scan rows** are keyed on `table.dat`'s mtime and size, not the storage
+fingerprint, and `invalidate()` leaves them: a FLAG write does not move rows.
+
+**Warm-up.** `/heatmap` calls `msdata.warm()`: one worker thread opens the
+partition and reads its scan rows while the heatmap is on screen. Only the
+latest request runs (a queued one that was overtaken is skipped), so flicking
+through scans does not queue reads. `create_app(warm=False)` turns it off.
+With profiling on it prints `[profile] warmed field F spw S scan N: ...`.
+
+**Coalescing.** `msdata._Coalescer.hold(key, what)` gives `_open`,
+`scan_rows` and `cached_plane` a per-key lock, so a request that arrives while
+the warm-up is reading waits for it instead of repeating it; the wait shows as
+`<what>: wait` (only when it actually waited).
+
+**Still open:** `invalidate()` (called by the flagger after every write)
+clears xarray-ms's multiton, so the next waterfall rebuilds its structure and
+reopens the scan -- tens of seconds on a large MS. Step 3's flag-and-redraw
+loop needs that fixed first.
+
 ## Colour scaling
 
 Default is **log**. chi-squared/dof spans orders of magnitude, and on a linear
@@ -440,7 +467,7 @@ four entries ~0.5 GB. Colour limits are cached per quantity on the entry
 (`Waterfall.limits`), so colours do not move on zoom and are not recomputed.
 
 Concurrent misses for the same plane (two tabs, a quick double click) wait on
-a per-key lock for the first read rather than each reading the MS;
+a per-key lock (`_Coalescer`) for the first read rather than each reading the MS;
 `lru_cache` does not coalesce them. A miss still peaks at roughly 1-2 GB at
 MeerKAT scale while the plane is formed; the waterfall passes `weight=None`
 to `products.form`, so unit weights are a broadcast view rather than a

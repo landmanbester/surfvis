@@ -7,7 +7,7 @@ import numpy as np
 from matplotlib import colormaps
 from matplotlib.backends.backend_agg import FigureCanvasAgg
 from matplotlib.cm import ScalarMappable
-from matplotlib.colors import LogNorm, Normalize, to_hex
+from matplotlib.colors import LogNorm, Normalize
 from matplotlib.figure import Figure
 from matplotlib.patches import Rectangle
 from matplotlib.ticker import FuncFormatter
@@ -65,18 +65,26 @@ def make_norm(values: np.ndarray, scale: str = "log"):
 
 
 def cell_colours(matrix: np.ndarray, norm) -> list[list[str]]:
-    """Map the chi-squared/dof matrix to per-cell hex colours."""
-    cmap = colormaps[CMAP]
-    out = []
-    for row in matrix:
-        colours = []
-        for value in row:
-            if np.isnan(value) or (isinstance(norm, LogNorm) and value <= 0):
-                colours.append(NAN_COLOUR)
-            else:
-                colours.append(to_hex(cmap(norm(value))))
-        out.append(colours)
-    return out
+    """Map the chi-squared/dof matrix to per-cell hex colours.
+
+    One call into the norm and colormap for the whole matrix: per cell, each
+    went through numpy masked arrays, and a 64-antenna grid took 4.6 s.
+    """
+    values = np.asarray(matrix, dtype=float)
+    blank = ~np.isfinite(values)
+    if isinstance(norm, LogNorm):
+        with np.errstate(invalid="ignore"):
+            blank |= values <= 0
+    # Blank cells get a harmless in-range value; their colour is replaced below.
+    safe = np.where(blank, norm.vmax, values)
+    rgb = colormaps[CMAP](np.ma.getdata(norm(safe)))[..., :3]
+    # Python's round, as matplotlib's to_hex uses: half to even, like np.rint.
+    channels = np.rint(rgb * 255).astype(int)
+    hexes = [
+        [NAN_COLOUR if b else "#%02x%02x%02x" % tuple(c) for c, b in zip(row, brow)]
+        for row, brow in zip(channels, blank)
+    ]
+    return hexes
 
 
 def histogram_png(values: np.ndarray, norm, title: str = "") -> bytes:

@@ -5,6 +5,7 @@ checks that the pipeline carries that outlier through to something a human
 would see.
 """
 
+import functools
 import json
 
 import pytest
@@ -863,3 +864,117 @@ def test_a_waterfall_opens_one_partition_not_the_whole_ms(chi2_zarr, monkeypatch
     assert panel.status_code == 200 and "Cannot open" not in panel.text
     assert client.get(f"/waterfall.bin?{query}").status_code == 200
     assert trees == []
+
+
+@needs_web
+def test_cell_colours_match_matplotlib_cell_by_cell():
+    """The vectorised colours are exactly what to_hex(cmap(norm(v))) gives, per cell."""
+    from matplotlib import colormaps
+    from matplotlib.colors import LogNorm, to_hex
+
+    from surfvis.web import render
+
+    rng = np.random.default_rng(1)
+    matrix = 10 ** rng.uniform(-2, 3, (40, 40))
+    matrix[rng.random(matrix.shape) < 0.1] = np.nan
+    matrix[0, :5] = [0.0, -1.0, np.inf, 1e-9, 1e9]
+    for scale in render.SCALES:
+        norm, _, _ = render.make_norm(matrix, scale)
+        expected = [
+            [
+                render.NAN_COLOUR
+                if not np.isfinite(v) or (isinstance(norm, LogNorm) and v <= 0)
+                else to_hex(colormaps[render.CMAP](norm(v)))
+                for v in row
+            ]
+            for row in matrix
+        ]
+        assert render.cell_colours(matrix, norm) == expected, scale
+
+
+@needs_web
+def test_scan_rows_are_read_once_per_scan(chi2_zarr, monkeypatch):
+    """Every baseline of a scan, in either order, comes from one query; a FLAG write keeps it."""
+    from surfvis.web import msdata
+
+    ms = chi2_zarr["ms"]["path"]
+    names = chi2_zarr["ms"]["antenna_names"]
+    msdata._query_scan_rows.cache_clear()
+    queries = []
+    real = msdata._query_scan_rows.__wrapped__
+    monkeypatch.setattr(
+        msdata, "_query_scan_rows", functools.lru_cache(maxsize=8)(lambda *a: queries.append(a) or real(*a))
+    )
+
+    for p, q in ((1, 5), (5, 1), (0, 2), (2, 3)):
+        rows, times = msdata.baseline_rows(ms, 0, 0, 1, names[p], names[q])
+        if p < q:  # the fixture stores the lower antenna first
+            assert rows.size == chi2_zarr["ms"]["ntime"] and rows.flags.writeable
+            assert np.all(np.diff(times) > 0)
+        else:
+            assert rows.size == 0
+    assert msdata.stored_order(ms, 0, 0, 1, names[5], names[1]) == (names[1], names[5])
+    msdata.invalidate(ms)  # what the flagger does after a write
+    msdata.baseline_rows(ms, 0, 0, 1, names[1], names[5])
+    assert len(queries) == 1
+    msdata.baseline_rows(ms, 0, 0, 2, names[1], names[5])
+    assert len(queries) == 2
+
+
+@needs_web
+def test_a_heatmap_warms_its_scan_for_the_first_waterfall(chi2_zarr, monkeypatch):
+    """While the heatmap is on screen the scan is opened and its rows read, once, in the background."""
+    pytest.importorskip("httpx2")
+    from fastapi.testclient import TestClient
+
+    from surfvis.web import msdata
+    from surfvis.web.app import create_app
+
+    ms = chi2_zarr["ms"]["path"]
+    msdata.invalidate(ms)
+    msdata._query_scan_rows.cache_clear()
+    futures = []
+    real_warm = msdata.warm
+    monkeypatch.setattr(msdata, "warm", lambda *a: futures.append(real_warm(*a)) or futures[-1])
+    client = TestClient(create_app(chi2_zarr["zarr"]))
+    assert client.get("/heatmap?field=0&spw=0&scan=1&c=XX").status_code == 200
+    assert futures[0].result(timeout=60) is True
+
+    opened = msdata._open_partition.cache_info().misses
+    queried = msdata._query_scan_rows.cache_info().misses
+    assert client.get("/waterfall.bin?field=0&spw=0&scan=1&c=XX&p=1&q=5").status_code == 200
+    assert msdata._open_partition.cache_info().misses == opened
+    assert msdata._query_scan_rows.cache_info().misses == queried
+
+    # Only the latest request is warmed: a queued one that was overtaken is skipped.
+    assert msdata._warm((ms, 0, 0, 2)) is False
+    quiet = TestClient(create_app(chi2_zarr["zarr"], warm=False))
+    quiet.get("/heatmap?field=0&spw=0&scan=2&c=XX")
+    assert len(futures) == 1
+
+
+@needs_web
+def test_a_request_waits_for_the_warm_up_instead_of_repeating_it(chi2_zarr, monkeypatch):
+    """Two threads missing on one scan read it once; the second waits, and says so in the profile."""
+    import threading
+    import time
+
+    from surfvis.web import msdata
+
+    ms = chi2_zarr["ms"]["path"]
+    names = chi2_zarr["ms"]["antenna_names"]
+    queries = []
+    real = msdata._query_scan_rows.__wrapped__
+
+    def slow(*a):
+        queries.append(a)
+        time.sleep(0.5)
+        return real(*a)
+
+    monkeypatch.setattr(msdata, "_query_scan_rows", functools.lru_cache(maxsize=8)(slow))
+    first = threading.Thread(target=msdata.scan_rows, args=(ms, 0, 0, 1))
+    first.start()
+    time.sleep(0.1)
+    rows, _ = msdata.baseline_rows(ms, 0, 0, 1, names[1], names[5])
+    first.join()
+    assert len(queries) == 1 and rows.size == chi2_zarr["ms"]["ntime"]

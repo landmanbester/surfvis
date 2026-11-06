@@ -75,6 +75,7 @@ def create_app(
     gtables: list[str] | None = None,
     allow_flagging: bool = False,
     profile: str | Path | None = None,
+    warm: bool = True,
 ) -> FastAPI:
     """Build the app around one chi-squared dataset.
 
@@ -90,6 +91,9 @@ def create_app(
             the browser is read-only unless asked otherwise.
         profile: Directory to write request timings and cProfile dumps of
             slow requests to (see :mod:`surfvis.web.profiling`). Off if None.
+        warm: Open a scan and read its rows in the background while its
+            heatmap is on screen, so the first waterfall does not wait for
+            that (on a large MS, the better part of a minute).
 
     Returns:
         A configured :class:`fastapi.FastAPI` instance.
@@ -191,6 +195,8 @@ def create_app(
         scale: str = Query("log"),
     ):
         matrix = _matrix(field, spw, scan, c)
+        if warm:
+            msdata.warm(ms_path, field, spw, scan)
 
         try:
             norm, vmin, vmax = render.make_norm(matrix.chi2_dof, scale)
