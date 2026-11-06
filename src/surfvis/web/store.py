@@ -8,16 +8,16 @@ import numpy as np
 import xarray as xr
 import zarr
 
+from surfvis.web.profiling import timed
+
 
 @dataclass(frozen=True)
 class Selection:
-    """One chunk of the chi-squared cube: a (field, spw, scan) at one bin."""
+    """One heatmap: a (field, spw, scan) and a product."""
 
     field: int
     spw: int
     scan: int
-    time_bin: int
-    freq_bin: int
     product: str
 
 
@@ -51,65 +51,65 @@ class Chi2Store:
         """Open one (field, spw, scan) group."""
         return _open_group(str(self.path), field, spw, scan)
 
-    def chunk(self, sel: Selection) -> "Chunk":
-        """Return the antenna-by-antenna chi-squared/dof matrix for one chunk."""
+    def matrix(self, sel: Selection) -> "Matrix":
+        """The antenna-by-antenna chi-squared/dof matrix of one scan and product."""
         ds = self.group(sel.field, sel.spw, sel.scan)
         hit = np.where(ds["product"].values.astype(str) == sel.product)[0]
         if hit.size == 0:
             raise KeyError(f"No product {sel.product!r}; have {list(ds['product'].values)}")
-        k = int(hit[0])
-        if not (0 <= sel.time_bin < ds.sizes["time_bin"] and 0 <= sel.freq_bin < ds.sizes["freq_bin"]):
-            raise IndexError(f"No bin ({sel.time_bin}, {sel.freq_bin}) in scan {sel.scan}")
-        # Index before reading: .values on the whole variable would load every
-        # bin of the scan, which with --ntimes 1 on a long scan is gigabytes.
-        idx = {"time_bin": sel.time_bin, "freq_bin": sel.freq_bin, "product": k}
-        chi2 = ds.chi2.isel(idx).values
-        counts = ds.counts.isel(idx).values
+        chi2, counts = _scan_totals(ds, int(hit[0]))
 
         with np.errstate(invalid="ignore", divide="ignore"):
             chi2_dof = np.where(counts > 0, chi2 / np.where(counts > 0, counts, 1), np.nan)
 
-        return Chunk(
+        return Matrix(
             selection=sel,
             chi2_dof=chi2_dof,
             antenna_names=list(ds.attrs["antenna_names"]),
-            t0=int(ds.t0.values[sel.time_bin]),
-            tf=int(ds.tf.values[sel.time_bin]),
-            chan0=int(ds.chan0.values[sel.freq_bin]),
-            chanf=int(ds.chanf.values[sel.freq_bin]),
             ms=str(ds.attrs["ms"]),
             rcol=str(ds.attrs["rcol"]),
             mcol=str(ds.attrs.get("mcol", "")),
             gtable=str(ds.attrs.get("gtable", "")),
         )
 
-    def chunk_attrs(self, field: int, spw: int, scan: int) -> dict:
+    def attrs(self, field: int, spw: int, scan: int) -> dict:
         """The attributes ``chi2`` recorded on a (field, spw, scan) group."""
         return dict(self.group(field, spw, scan).attrs)
 
-    def bins(self, field: int, spw: int, scan: int) -> tuple[list[int], list[int], list[str]]:
-        """Available (time bins, freq bins, products) for a scan."""
+    def products(self, field: int, spw: int, scan: int) -> list[str]:
+        """The products (``XX``, ``I``, ...) a scan has."""
         ds = self.group(field, spw, scan)
         if "product" not in ds.coords:
             raise ValueError(f"{self.path} predates products (has no 'product' axis); rerun surfvis chi2")
-        return (
-            [int(v) for v in ds.time_bin.values],
-            [int(v) for v in ds.freq_bin.values],
-            [str(v) for v in ds["product"].values],
-        )
+        return [str(v) for v in ds["product"].values]
+
+
+@timed("zarr: scan totals")
+def _scan_totals(ds: xr.Dataset, k: int) -> tuple[np.ndarray, np.ndarray]:
+    """One product's chi-squared and counts summed over the scan.
+
+    ``chi2`` now writes these sums directly. Older stores kept every (time
+    bin, freq bin) chunk; those are summed one time bin at a time, so the
+    whole cube is never in memory (with ``--ntimes 1`` on a long scan it is
+    gigabytes).
+    """
+    if "time_bin" not in ds.dims:
+        return ds.chi2.isel(product=k).values, ds.counts.isel(product=k).values
+    chi2 = counts = 0.0
+    for t in range(ds.sizes["time_bin"]):
+        idx = {"time_bin": t, "product": k}
+        chi2 = chi2 + ds.chi2.isel(idx).values.sum(axis=0)
+        counts = counts + ds.counts.isel(idx).values.sum(axis=0)
+    return chi2, counts
 
 
 @dataclass(frozen=True)
-class Chunk:
-    """A single chunk's chi-squared/dof matrix plus the context to plot it."""
+class Matrix:
+    """One scan's chi-squared/dof matrix for one product, plus the context to plot it."""
 
     selection: Selection
     chi2_dof: np.ndarray
     antenna_names: list[str]
-    t0: int
-    tf: int
-    chan0: int
-    chanf: int
     ms: str
     rcol: str
     # How chi2 formed the quantity; empty when not used.
@@ -129,6 +129,7 @@ class Chunk:
 
 
 @lru_cache(maxsize=32)
+@timed("zarr: open group")
 def _open_group(path: str, field: int, spw: int, scan: int) -> xr.Dataset:
     # chunks=None reads eagerly into numpy. Without it xarray returns
     # dask-backed arrays, which would make dask a hard requirement of the web

@@ -125,7 +125,7 @@ Things to know:
 ## Browsing chi-squared interactively
 
 `surfvis serve` turns `surfchi2` output into a browsable page: an
-antenna-by-antenna chi-squared grid for one chunk, the histogram over all
+antenna-by-antenna chi-squared grid for one scan, the histogram over all
 antenna pairs beside it, and a click on any cell plotting that baseline's
 waterfall straight from the Measurement Set.
 
@@ -178,7 +178,9 @@ Useful flags:
 | `--gtable` | none | A gain term the waterfall may offer (repeatable). The term `chi2` used, and terms in `*.qc` directories next to the MS, are offered anyway; no other path is opened. |
 | `--host` | `127.0.0.1` | Use `0.0.0.0` in a container, or to accept remote connections. |
 | `--port` | `8000` | Change if the port is taken. |
+| `--allow-flagging` | off | Let the browser write FLAG (see below). |
 | `--reload` | off | Development only. |
+| `--profile DIR` | off | Time every request: a per-step breakdown is printed, appended to `DIR/spans.jsonl` and sent as a `Server-Timing` header (the browser's network panel shows it). Requests over a second also leave a cProfile dump in `DIR`. `python -m surfvis.web.profiling DIR` totals the steps. |
 
 `--host 127.0.0.1` means nothing outside the machine can reach it. That is the
 right default; to view it from your laptop, forward the port rather than
@@ -254,10 +256,15 @@ A bar across the top of the page runs while anything is loading. The part being
 replaced dims, and plots show a spinner until they arrive; reading a waterfall
 from the MS is the slow part.
 
-**The controls along the top** choose which chunk you are looking at: field
-(listed by name), spw, scan, then the time bin and frequency bin within that scan, then the
-polarization. These are the same chunks `surfchi2` wrote PNGs for -- the bins
-follow the `--ntimes` and `--nfreqs` you ran with.
+**The waterfall** is drawn in the browser. The wheel zooms, shift-drag (or
+middle-drag) pans, `0` or "Reset view" resets, and hovering shows the time,
+frequency and value under the cursor. "show flags" toggles the flag overlay.
+Zooming in fetches the visible window at finer resolution.
+
+**The controls along the top** choose what you are looking at: field (listed
+by name), spw, scan, then the product. The grid covers the whole scan, every
+time and channel; `--ntimes` and `--nfreqs` only split the work in `chi2`
+(and set the per-chunk PNGs it writes).
 
 **The grid** is chi-squared per degree of freedom for every antenna pair, the
 same quantity as the `surfchi2` images. Rows are antenna1, columns antenna2,
@@ -271,7 +278,7 @@ the worst pairs.
 
 **The histogram** beside the grid is the whole distribution over antenna pairs,
 with a dashed line at chi-squared/dof = 1 when that falls within the data. This is how you judge whether a
-chunk has outliers at all: a single clean peak means the colour scale is just
+scan has outliers at all: a single clean peak means the colour scale is just
 stretched over noise, whereas a long tail or a detached bar means something is
 genuinely wrong. The colourbar underneath is the scale the grid is using.
 
@@ -284,13 +291,12 @@ better view once you know where the problem is, though it degenerates when
 there are few antenna pairs. `full` is plain min-to-max.
 
 **Clicking any cell** plots that baseline's waterfall below: the whole scan by
-all channels against UTC, for the product you are viewing. The chunk you
-clicked is outlined in green, so you can see whether the bad chunk is isolated
-or part of something larger. Flagged data is greyed out, as are slots where the
-MS has no data at all.
+all channels against UTC, for the product you are viewing, so you can see
+whether the problem is a short burst, a band of channels or the whole scan.
+Flagged data is greyed out, as are slots where the MS has no data at all.
 
 The selected baseline stays selected. **Arrow keys** move it (up/down change
-antenna1, left/right antenna2), and changing the field, scan, bin or product
+antenna1, left/right antenna2), and changing the field, scan or product
 re-plots the same baseline there.
 
 **The controls under the waterfall** re-plot it without changing your place in
@@ -368,8 +374,13 @@ select a compatible subset.
 `surfvis flag-chi2` writes to the flag column of the MS you give it. There is
 no dry-run.
 
-`surfvis serve` is read-only. Manual flagging from the waterfall is planned in
-[#16](https://github.com/ratt-ru/surfvis/issues/16).
+`surfvis serve` is read-only unless started with `--allow-flagging`. Manual
+flagging from the waterfall is in progress
+([#16](https://github.com/ratt-ru/surfvis/issues/16)): the server side exists,
+the selection tool in the page does not yet. Before its first write, a
+flagging session saves FLAG as a CASA flag version named
+`surfvis_before_<UTC timestamp>`, so `flagmanager` (or the flags menu) can
+restore it.
 
 ## Development
 

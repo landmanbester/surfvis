@@ -49,7 +49,7 @@ docker run --rm --user "$(id -u):$(id -g)" -e HOME=/tmp -v "$PWD":/src -w /src \
    PYTHONPATH=/tmp/t:/src/src:/src /tmp/t/bin/pytest tests/ -q -W ignore"
 ```
 
-That is the only way to run the full suite (65 tests). **CI does not run them** —
+That is the only way to run the full suite (105 tests; the node one skips in the container). **CI does not run them** —
 `.github/workflows/ci.yml` installs the lightweight package only, deliberately,
 since python-casacore and numba make CI slow and brittle. Verify locally.
 
@@ -79,11 +79,11 @@ Three layers, and the boundary between them is load-bearing:
 - **`utils/`** is heavy too (`chisq.py` numba kernels, `plotting.py` matplotlib)
   and is imported only from `core/`.
 - **`web/`** is the browser: `store.py` (zarr), `msdata.py` (MS via xarray-ms
-  and arcae), `render.py` (colours + PNGs), `app.py` (FastAPI), `templates/`
+  and arcae), `render.py` (colours + PNGs), `planes.py` (waterfall reduction), `profiling.py` (`serve --profile`), `app.py` (FastAPI), `templates/`
   (htmx partials) and `static/app.js` (selection, hover readout, arrow keys,
-  carried settings, loading states, Save as PNG). `htmx.min.js` and
+  carried settings, loading states, Save as PNG), and `static/wf/` (the canvas waterfall as ES modules, node-tested via `tests/test_js.py`; node is not in the container). `htmx.min.js` and
   `html-to-image.js` are vendored, not loaded from a CDN: compute nodes are
-  often offline. Dask-free, and read-only for now.
+  often offline. Dask-free. `flagging.py` is the one write path (below).
 - **`utils/products.py` and `utils/gains.py`** are the exception to "utils is
   heavy": numpy/xarray only, shared by `chi2` and `web/` so the heatmap and the
   waterfall form corrected residuals and Stokes products with the same code.
@@ -92,8 +92,9 @@ Three layers, and the boundary between them is load-bearing:
 stack, `[web]` the browser. The Dockerfile installs `[full,web]`.
 
 Data flow for the browser: `chi2 --dataout` writes χ² and counts per
-`(time bin, freq bin, product, antenna, antenna)`, one zarr group per
-`(field, spw, scan)`. `serve` reads that for the heatmap and only opens the MS
+`(product, antenna, antenna)`, summed over the scan, one zarr group per
+`(field, spw, scan)`. `--ntimes`/`--nfreqs` only chunk the work (and the
+per-chunk PNGs); the browser shows one scan at a time. `serve` reads that for the heatmap and only opens the MS
 when a waterfall is requested. The waterfall's model / gain table / flag
 version / product controls recompute the waterfall only; they default to how
 `chi2` formed the heatmap, and the panel says when they no longer match.
@@ -146,9 +147,12 @@ forever, with no output. The failure is load-dependent, so it presents as an
 intermittent hang.
 
 **MSv4 renames columns; resolve, do not hardcode.** `DATA` is exposed as
-`VISIBILITY`, `WEIGHT_SPECTRUM` as `WEIGHT`. Read them from
-`attrs["data_groups"][group]`, as `pfb-imaging`'s `core/imager.py` does.
-`data_groups` is attached by `open_datatree`, **not** `open_dataset`. Columns
+`VISIBILITY`, `WEIGHT_SPECTRUM` as `WEIGHT`, through `msdata.data_group()`.
+`data_groups` is attached by `open_datatree`, **not** `open_dataset`, but
+**never open the datatree to read it**: that opens every partition, and
+xarray-ms scans every extra column's row shapes in each -- over ten minutes on
+a real MS before the first waterfall. The MSv2 backend hard-codes the one
+`base` group, so `data_group()` returns that constant. Columns
 outside the MSv2 standard (`RESIDUAL`) are not renamed, and neither are
 `CORRECTED_DATA` and `MODEL_DATA`: xarray-ms keeps them as secondary variables
 under their own names. Mapping `CORRECTED_DATA` to `VISIBILITY` (as
@@ -190,6 +194,10 @@ the MSv4 view unless `FEED` (validated against ANTENNA1/2), `STATE`, and the
 `FIELD` direction columns are populated. `tests/fixtures/ms.py` does this.
 
 **`--dataout` and `--imagesout` are deleted and recreated** on every `chi2` run.
+
+**The canvas waterfall's plane cache is memory-heavy.** `msdata.cached_plane`
+keeps four planes at ~9 bytes per cell (complex64 + flags), so 450 x 32768 is
+~130 MB each; keep it complex64 and never cache `values`.
 
 **`serve` opens only the gain tables it offers.** It has no authentication,
 so `gtable` in a query string must not name arbitrary paths: the term `chi2`
@@ -244,14 +252,32 @@ The project is **moving away from Dask and distributed**. `core/chi2.py` and
 not. Before writing new parallel
 or kernel code, consult `rarg-ray-patterns` (Ray actor autoscaling,
 `wrap_future` bridging `ObjectRef` to asyncio) and `rarg-numba-patterns` (atomic
-spinlocks, typed pointer intrinsics). Manual flagging from the waterfall is designed in issue #16 (rectangle select on
-the PNG, arcae writes, `--allow-flagging`, a flag-version backup and undo);
-read it before adding any write path to `web/`.
-
-The spawn workaround above is a band-aid
+spinlocks, typed pointer intrinsics). The spawn workaround above is a band-aid
 over the fork+threads architecture that this migration removes: numba atomics
 would let the chi-squared kernel accumulate into one shared matrix, deleting the
 process pool, the pickling and the parent reduction together.
+
+**Manual flagging** from the waterfall is designed in issue #16 and is being
+built on the `flagging` branch, stacked on `serve-ui`. The write path is
+`web/flagging.py`: selections are polygons in (time slot, channel), rasterised
+on the server by cell centre and even-odd; writes need `serve
+--allow-flagging`, save FLAG as a CASA flag version before the first write, and
+keep an undo stack. Next is a canvas-drawn waterfall with polygon and
+drag-rectangle selection. Any new write to the MS goes through `Flagger`.
+
+## Agent skills
+
+### Issue tracker
+
+GitHub Issues on the fork `landmanbester/surfvis` (`origin`), via `gh`; `ratt-ru/surfvis` is `upstream`. See `docs/agents/issue-tracker.md`.
+
+### Triage labels
+
+The five defaults: needs-triage, needs-info, ready-for-agent, ready-for-human, wontfix. See `docs/agents/triage-labels.md`.
+
+### Domain docs
+
+Single-context: `GLOSSARY.md` and `docs/adr/` at the repo root (created lazily), alongside the canonical `docs/wiki/`. See `docs/agents/domain.md`.
 
 ## LLM wiki
 

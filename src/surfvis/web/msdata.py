@@ -14,7 +14,12 @@ surfchi2 works on plottable.
 """
 
 import os
-from dataclasses import dataclass
+import sys
+import threading
+import time
+from concurrent.futures import ThreadPoolExecutor
+from contextlib import contextmanager
+from dataclasses import dataclass, field, replace
 from functools import lru_cache
 
 import numpy as np
@@ -23,6 +28,8 @@ import xarray
 from surfvis.utils import gains as gains_mod
 from surfvis.utils import products
 from surfvis.utils.msv4 import ignore_xarray_ms_warnings
+from surfvis.web import profiling
+from surfvis.web.profiling import span, timed
 
 ignore_xarray_ms_warnings()
 
@@ -39,6 +46,39 @@ MJD_UNIX_OFFSET = 3506716800.0
 
 # Last-seen on-disk signature per MS, so a rewrite invalidates the caches.
 _FINGERPRINTS: dict[str, tuple] = {}
+
+
+class _Coalescer:
+    """One lock per cache key, so concurrent misses wait for the first read instead of repeating it.
+
+    ``lru_cache`` does not coalesce: two threads missing on one key both do the
+    work. Here that is a request and the background warm-up both opening a
+    scan, which on a large MS is half a minute each.
+    """
+
+    def __init__(self) -> None:
+        self._locks: dict[tuple, threading.Lock] = {}
+        self._guard = threading.Lock()
+
+    @contextmanager
+    def hold(self, key: tuple, what: str):
+        """Hold ``key``'s lock; a wait for it shows up in the profile as ``what: wait``."""
+        with self._guard:
+            if len(self._locks) > 1024:  # one per key ever asked for; drop the idle ones
+                for stale in [k for k, v in self._locks.items() if not v.locked()]:
+                    del self._locks[stale]
+            lock = self._locks.setdefault(key, threading.Lock())
+        if not lock.acquire(blocking=False):
+            with span(f"{what}: wait"):
+                lock.acquire()
+        try:
+            yield
+        finally:
+            lock.release()
+
+
+_OPENING = _Coalescer()
+_SCANNING = _Coalescer()
 
 
 @dataclass(frozen=True)
@@ -84,35 +124,39 @@ class Waterfall:
     length: float | None = None
     # Unix seconds of each time slot; None if not known.
     times: np.ndarray | None = None
+    # The complex plane the values were taken from, and the channel
+    # frequencies in Hz; None where not known.
+    plane: np.ndarray | None = None
+    freqs: np.ndarray | None = None
+    # Colour limits per quantity, filled in by the canvas route on a cached plane.
+    limits: dict = field(default_factory=dict, compare=False, repr=False)
 
 
-@lru_cache(maxsize=8)
+# The one data group xarray-ms's MSv2 backend defines. It is a constant
+# (``MSv2EntryPoint.postprocess_datasets`` writes it into the datatree's
+# ``data_groups``), so nothing is opened to learn it.
+_MSV2_GROUPS = {"base": DataGroup(correlated_data="VISIBILITY", weight="WEIGHT", flag="FLAG")}
+
+
 def data_group(ms: str, group: str = "base") -> DataGroup:
     """Resolve the MSv4 data group for an MS.
 
-    ``data_groups`` is attached by ``open_datatree`` (not ``open_dataset``), so
-    this opens the tree once and caches the result -- it is identical across
-    partitions.
-    """
-    from msv4_utils.msv4_types import VISIBILITY_XDS_TYPES
+    Not read from ``open_datatree``'s ``data_groups``: that opens every
+    partition, and xarray-ms scans the row shapes of every extra column in
+    each, which on a large MS took over ten minutes, for a value the backend
+    hard-codes. ``ms`` is kept so callers need not change if that stops being
+    true.
 
-    tree = xarray.open_datatree(ms, engine="xarray-ms:msv2", partition_schema=list(PARTITION_SCHEMA))
-    for node in tree.children.values():
-        if node.attrs.get("type") not in VISIBILITY_XDS_TYPES:
-            continue
-        groups = node.ds.attrs.get("data_groups", {})
-        if group not in groups:
-            raise KeyError(f"No data group {group!r} in {ms}. Have: {sorted(groups)}")
-        spec = groups[group]
-        return DataGroup(
-            correlated_data=spec["correlated_data"],
-            weight=spec["weight"],
-            flag=spec.get("flag", "FLAG"),
-        )
-    raise ValueError(f"{ms} contains no visibility partitions")
+    Raises:
+        KeyError: for a group other than ``base``.
+    """
+    if group not in _MSV2_GROUPS:
+        raise KeyError(f"No data group {group!r} in {ms}. Have: {sorted(_MSV2_GROUPS)}")
+    return _MSV2_GROUPS[group]
 
 
 @lru_cache(maxsize=8)
+@timed("open_partition")
 def _open_partition(ms: str, field: int, spw: int, scan: int, fingerprint: tuple) -> xarray.Dataset:
     """Open one (field, spw, scan) partition. Cached -- opening is not free.
 
@@ -127,6 +171,7 @@ def _open_partition(ms: str, field: int, spw: int, scan: int, fingerprint: tuple
     )
 
 
+@timed("fingerprint")
 def _fingerprint(ms: str) -> tuple:
     """A cheap signature of the MS's column storage on disk.
 
@@ -148,6 +193,7 @@ def _fingerprint(ms: str) -> tuple:
     return tuple(sorted(entries))
 
 
+@timed("release_cached_tables")
 def _release_cached_tables() -> None:
     """Drop the tables xarray-ms holds open, so the next read goes to disk.
 
@@ -186,13 +232,15 @@ def _open(ms: str, field: int, spw: int, scan: int) -> xarray.Dataset:
     """
     fingerprint = _fingerprint(ms)
     if _FINGERPRINTS.get(ms) != fingerprint:
+        # Also taken on the first request for an MS, when nothing is cached yet.
         _open_partition.cache_clear()
-        data_group.cache_clear()
         _release_cached_tables()
         _FINGERPRINTS[ms] = fingerprint
-    return _open_partition(ms, field, spw, scan, fingerprint)
+    with _OPENING.hold((ms, field, spw, scan), "open_partition"):
+        return _open_partition(ms, field, spw, scan, fingerprint)
 
 
+@timed("available_columns")
 def available_columns(ms: str, field: int, spw: int, scan: int, complex_only: bool = False) -> list[str]:
     """Data variables with a (time, baseline, freq, pol) shape, i.e. plottable.
 
@@ -238,6 +286,7 @@ def field_names(ms: str) -> dict[int, str]:
 
 
 @lru_cache(maxsize=8)
+@timed("antenna_positions")
 def _antenna_positions(ms: str) -> dict[str, np.ndarray]:
     import arcae
 
@@ -298,6 +347,178 @@ def ms_times(ds: xarray.Dataset) -> np.ndarray:
     return times
 
 
+@dataclass(frozen=True)
+class ScanRows:
+    """Every main-table row of one (field, spw, scan): its antennas, row number and TIME."""
+
+    antenna1: np.ndarray
+    antenna2: np.ndarray
+    rows: np.ndarray
+    times: np.ndarray
+
+
+@lru_cache(maxsize=8)
+def _antenna_ids(ms: str, stamp: tuple) -> dict[str, int]:
+    import arcae
+
+    ant = arcae.table(f"{ms}::ANTENNA")
+    try:
+        return {str(n): k for k, n in enumerate(ant.getcol("NAME"))}
+    finally:
+        ant.close()
+
+
+@lru_cache(maxsize=8)
+@timed("scan_rows: query")
+def _query_scan_rows(ms: str, field: int, spw: int, scan: int, stamp: tuple) -> ScanRows:
+    """One TaQL pass over the main table for a whole scan. ``stamp`` only keys the cache."""
+    from arcae.lib.arrow_tables import Table
+
+    sel = Table.from_taql(
+        f"SELECT ROWID() AS ROW, TIME, ANTENNA1, ANTENNA2 FROM '{ms}' "
+        f"WHERE FIELD_ID=={field} && DATA_DESC_ID=={spw} && SCAN_NUMBER=={scan}"
+    )
+    try:
+        if not sel.nrow():
+            empty = np.zeros(0, np.int32)
+            return ScanRows(empty, empty, np.zeros(0, np.int64), np.zeros(0))
+        return ScanRows(
+            antenna1=np.asarray(sel.getcol("ANTENNA1"), dtype=np.int32),
+            antenna2=np.asarray(sel.getcol("ANTENNA2"), dtype=np.int32),
+            rows=np.array(sel.getcol("ROW"), dtype=np.int64),
+            times=np.asarray(sel.getcol("TIME"), dtype=float),
+        )
+    finally:
+        sel.close()
+
+
+def _layout_stamp(ms: str) -> tuple:
+    """Changes when rows are added or removed (``table.dat``), not when FLAG is written.
+
+    Flag edits rewrite the ``table.f*`` storage files that :func:`_fingerprint`
+    watches; they leave the row layout alone, so the scan's rows stay cached
+    across them.
+    """
+    try:
+        stat = os.stat(os.path.join(ms, "table.dat"))
+    except OSError:
+        return ()
+    return (stat.st_mtime_ns, stat.st_size)
+
+
+def scan_rows(ms: str, field: int, spw: int, scan: int) -> ScanRows:
+    """Every row of a scan, read once and cached; see :class:`ScanRows`."""
+    stamp = _layout_stamp(ms)
+    with _SCANNING.hold((ms, field, spw, scan), "scan_rows"):
+        return _query_scan_rows(ms, field, spw, scan, stamp)
+
+
+@timed("baseline_rows")
+def baseline_rows(ms: str, field: int, spw: int, scan: int, name1: str, name2: str) -> tuple[np.ndarray, np.ndarray]:
+    """Main-table row numbers and TIME values (MJD seconds) of one baseline in one partition.
+
+    Only the given antenna order matches: pass the order the MS stores the
+    baseline in, as the waterfall shows it. A baseline stored both ways in one
+    partition is two baselines to xarray-ms, and flagging one must not touch
+    the other. Selected from :func:`scan_rows`, so a query over the main table
+    runs once per scan rather than per baseline (on a 10 M-row MS each query
+    took 7 s). The row array is a writable copy: arcae rejects read-only
+    buffers as row indices.
+    """
+    ids = _antenna_ids(ms, _layout_stamp(ms))
+    a, b = ids[name1], ids[name2]
+    scan_ = scan_rows(ms, field, spw, scan)
+    hit = (scan_.antenna1 == a) & (scan_.antenna2 == b)
+    return scan_.rows[hit].copy(), scan_.times[hit]
+
+
+def stored_order(ms: str, field: int, spw: int, scan: int, name1: str, name2: str) -> tuple[str, str]:
+    """The baseline's antenna order as the MS stores it, which is the order its data is in.
+
+    Not xarray-ms's ``baseline_antenna1/2_name``: a baseline stored as (2, 0)
+    is labelled (0, 2) there while its data stays V_20, unconjugated. Gains,
+    cross-hand labels and flag rows must follow the data, so ask the MS. The
+    requested order wins if the MS holds both.
+    """
+    if baseline_rows(ms, field, spw, scan, name1, name2)[0].size:
+        return name1, name2
+    if baseline_rows(ms, field, spw, scan, name2, name1)[0].size:
+        return name2, name1
+    raise KeyError(f"No baseline {name1}-{name2} in field {field}, spw {spw}, scan {scan}")
+
+
+def slot_index(grid: np.ndarray, times: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+    """Each TIME's slot on the partition's time grid, and whether it landed on one."""
+    if grid.size == 0:
+        return np.zeros(times.shape, int), np.zeros(times.shape, bool)
+    idx = np.clip(np.searchsorted(grid, times), 0, grid.size - 1)
+    # searchsorted gives the insertion point; the nearer neighbour may be below.
+    below = np.clip(idx - 1, 0, grid.size - 1)
+    idx = np.where(np.abs(grid[below] - times) < np.abs(grid[idx] - times), below, idx)
+    return idx, np.abs(grid[idx] - times) < gains_mod.TIME_TOLERANCE
+
+
+def invalidate(ms: str) -> None:
+    """Forget everything cached about ``ms``, so the next read goes to disk.
+
+    For writes made by this process: ``_open`` notices a rewritten MS by its
+    storage files' mtimes, but a write and a read inside one mtime tick would
+    slip past that.
+    """
+    _FINGERPRINTS.pop(ms, None)
+    _open_partition.cache_clear()
+    _cached_plane.cache_clear()
+    _release_cached_tables()
+    # Not _query_scan_rows: a FLAG write leaves the row layout alone, and
+    # _layout_stamp catches anything that does not.
+
+
+# Warming a scan in the background while its heatmap is on screen. One worker:
+# flicking through scans must not start a read per scan, so a queued warm-up
+# that is no longer the latest request is skipped.
+_WARMER = ThreadPoolExecutor(max_workers=1, thread_name_prefix="surfvis-warm")
+_WARM_GUARD = threading.Lock()
+_WARM_WANTED: tuple | None = None
+
+
+def warm(ms: str, field: int, spw: int, scan: int):
+    """Open a scan and read its rows in the background, ready for its first waterfall.
+
+    Returns:
+        The :class:`concurrent.futures.Future` of the warm-up (tests wait on it).
+    """
+    global _WARM_WANTED
+    key = (ms, field, spw, scan)
+    with _WARM_GUARD:
+        _WARM_WANTED = key
+    return _WARMER.submit(_warm, key)
+
+
+def _warm(key: tuple) -> bool:
+    """Run one warm-up, unless a newer one has been asked for. Never raises: nobody is waiting."""
+    with _WARM_GUARD:
+        if key != _WARM_WANTED:
+            return False
+    ms, field, spw, scan = key
+    try:
+        start = time.perf_counter()
+        _open(*key)
+        opened = time.perf_counter()
+        scan_rows(*key)
+        if profiling.enabled():
+            print(
+                f"[profile] warmed field {field} spw {spw} scan {scan}: open {opened - start:.3f} s, "
+                f"rows {time.perf_counter() - opened:.3f} s",
+                file=sys.stderr,
+                flush=True,
+            )
+        return True
+    except Exception as exc:  # noqa: BLE001 - the request that needs it will raise properly
+        print(f"surfvis: warming scan {scan} failed: {exc}", file=sys.stderr, flush=True)
+        return False
+
+
+@timed("version_flags")
 def _version_flags(
     ms: str,
     version: str,
@@ -318,28 +539,11 @@ def _version_flags(
     so the web layer needs no python-casacore.
     """
     import arcae
-    from arcae.lib.arrow_tables import Table
 
     if version not in flag_versions(ms):
         raise KeyError(f"No flag version {version!r} for {ms}. Have: {flag_versions(ms)}")
 
-    ant = arcae.table(f"{ms}::ANTENNA")
-    try:
-        ids = {str(n): k for k, n in enumerate(ant.getcol("NAME"))}
-    finally:
-        ant.close()
-    a, b = ids[name1], ids[name2]
-
-    sel = Table.from_taql(
-        f"SELECT ROWID() AS ROW, TIME FROM '{ms}' WHERE FIELD_ID=={field} && DATA_DESC_ID=={spw} && "
-        f"SCAN_NUMBER=={scan} && ((ANTENNA1=={a} && ANTENNA2=={b}) || (ANTENNA1=={b} && ANTENNA2=={a}))"
-    )
-    try:
-        # A writable copy: arcae rejects read-only buffers as row indices.
-        rows = np.array(sel.getcol("ROW"), dtype=np.int64) if sel.nrow() else np.zeros(0, np.int64)
-        times = sel.getcol("TIME") if sel.nrow() else np.zeros(0)
-    finally:
-        sel.close()
+    rows, times = baseline_rows(ms, field, spw, scan, name1, name2)
 
     nchan = None
     if rows.size:
@@ -355,12 +559,12 @@ def _version_flags(
     if nchan is None:
         raise KeyError(f"No rows for {name1}-{name2} in scan {scan}")
     out = np.ones((grid.size, nchan, len(corr_idx)), dtype=bool)
-    idx = np.clip(np.searchsorted(grid, times), 0, grid.size - 1)
-    hit = np.abs(grid[idx] - times) < gains_mod.TIME_TOLERANCE
+    idx, hit = slot_index(grid, times)
     out[idx[hit]] = flags[hit]
     return out
 
 
+@timed("check")
 def check(
     ms: str,
     field: int,
@@ -404,6 +608,7 @@ def check(
     return problems
 
 
+@timed("gains")
 def _gains(
     ms: str, gtable: str, field: int, spw: int, scan: int, ds: xarray.Dataset
 ) -> tuple[products.Gains, list[str]]:
@@ -413,6 +618,7 @@ def _gains(
     return gains, names
 
 
+@timed("waterfall")
 def waterfall(
     ms: str,
     field: int,
@@ -470,11 +676,10 @@ def waterfall(
             raise KeyError(f"Column {name!r} not in this Measurement Set. Have: {sorted(ds.data_vars)}")
 
     # Plot the baseline the way the MS stores it. The grid is symmetric, so a
-    # click can ask for (q, p); the row read is (p, q), and gains, cross-hand
-    # labels and the title must all follow the row, not the request.
+    # click can ask for (q, p); the data read is in the stored order, and
+    # gains, cross-hand labels and the title must all follow it.
     k = baseline_index(ds, name1, name2)
-    if str(ds.baseline_antenna1_name.values[k]) != name1:
-        name1, name2 = name2, name1
+    name1, name2 = stored_order(ms, field, spw, scan, name1, name2)
 
     labels_ = [str(p) for p in ds.polarization.values]
     gains = None
@@ -488,12 +693,17 @@ def waterfall(
     corr_idx = [labels_.index(c) for c in read]
 
     sel = {"baseline_id": k, "polarization": corr_idx}
-    vis = ds[resolved].isel(sel).values
-    mvis = ds[group.resolve(model)].isel(sel).values if model else None
+    with span(f"read {resolved}"):
+        vis = ds[resolved].isel(sel).values
+    mvis = None
+    if model:
+        with span(f"read {group.resolve(model)}"):
+            mvis = ds[group.resolve(model)].isel(sel).values
     if flagversion:
         flags = _version_flags(ms, flagversion, field, spw, scan, name1, name2, ms_times(ds), corr_idx)
     else:
-        flags = ds[group.flag].isel(sel).values.astype(bool)
+        with span("read flags"):
+            flags = ds[group.flag].isel(sel).values.astype(bool)
     # xarray-ms lays a regular (time, baseline) grid over the MS and fills gaps
     # with NaN. Those slots hold no data, so treat them as flagged rather than
     # letting them punch holes in the colour scale.
@@ -506,18 +716,19 @@ def waterfall(
     if gains is not None:
         grid = ms_times(ds)
         tidx = gains.time_index(grid, grid)
-    plane, _, pflags = products.form(
-        [product],
-        read,
-        vis,
-        np.ones(vis.shape),
-        flags,
-        ant1,
-        ant2,
-        tidx=tidx,
-        gains=gains,
-        model=mvis,
-    )
+    with span("form product"):
+        plane, _, pflags = products.form(
+            [product],
+            read,
+            vis,
+            None,  # unit weights; the waterfall plots values only
+            flags,
+            ant1,
+            ant2,
+            tidx=tidx,
+            gains=gains,
+            model=mvis,
+        )
     plane, pflags = plane[..., 0], pflags[..., 0]
 
     if quantity == "phase":
@@ -542,7 +753,86 @@ def waterfall(
         rect=rect,
         length=baseline_length(ms, name1, name2),
         times=ms_times(ds) - MJD_UNIX_OFFSET,
+        plane=plane,
+        freqs=np.asarray(ds.frequency.values, dtype=float),
     )
+
+
+def cached_plane(
+    ms: str,
+    field: int,
+    spw: int,
+    scan: int,
+    name1: str,
+    name2: str,
+    product: str,
+    column: str,
+    model: str = "",
+    gtable: str = "",
+    flagversion: str = "",
+) -> Waterfall:
+    """One baseline's formed complex plane, cached so zooming does not re-read the MS.
+
+    The key includes the MS's on-disk fingerprint and the gain term's mtime,
+    so a rewritten MS or a re-solved gain table is read afresh. ``quantity``
+    and the chunk rectangle are not part of the key. The entry is slimmed to
+    save memory: ``plane`` is complex64 and ``values`` is None, so use
+    ``plane``; ``rect`` is None.
+    """
+    key = (ms, field, spw, scan, name1, name2, product, column, model, gtable, flagversion)
+    with _PLANES.hold(key, "cached_plane"):
+        return _cached_plane(
+            ms,
+            field,
+            spw,
+            scan,
+            name1,
+            name2,
+            product,
+            column,
+            model,
+            gtable,
+            flagversion,
+            _fingerprint(ms),
+            _gtable_stamp(gtable),
+        )
+
+
+_PLANES = _Coalescer()
+
+
+@lru_cache(maxsize=4)
+@timed("cached_plane: miss")
+def _cached_plane(
+    ms, field, spw, scan, name1, name2, product, column, model, gtable, flagversion, fingerprint, gstamp
+) -> Waterfall:
+    # fingerprint and gstamp only key the cache.
+    wf = waterfall(
+        ms,
+        field,
+        spw,
+        scan,
+        name1,
+        name2,
+        product,
+        column,
+        quantity="amp",
+        rect=None,
+        model=model,
+        gtable=gtable,
+        flagversion=flagversion,
+    )
+    return replace(wf, plane=wf.plane.astype(np.complex64), values=None)
+
+
+def _gtable_stamp(gtable: str) -> int | None:
+    """mtime of a gain term's directory, or None."""
+    if not gtable:
+        return None
+    try:
+        return os.stat(gains_mod.term_path(gtable)).st_mtime_ns
+    except OSError:
+        return None
 
 
 def _describe(column: str, model: str, gtable: str) -> str:

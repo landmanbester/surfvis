@@ -3,12 +3,11 @@
   <div class="panel-head">
     <h2>&chi;<sup>2</sup>/dof &mdash; antenna &times; antenna &middot; {{ product }}</h2>
     <p class="meta">
-      {% if chunk.gtable %}corrected {% endif %}{{ chunk.rcol }}{% if chunk.mcol %} &minus; {{ chunk.mcol }}{% endif %}
-      {% if chunk.gtable %}&middot; gains <code>{{ chunk.gtable }}</code>{% endif %}
+      {% if matrix.gtable %}corrected {% endif %}{{ matrix.rcol }}{% if matrix.mcol %} &minus; {{ matrix.mcol }}{% endif %}
+      {% if matrix.gtable %}&middot; gains <code>{{ matrix.gtable }}</code>{% endif %}
     </p>
     <p class="meta">
-      time slots {{ chunk.t0 }}&ndash;{{ chunk.tf }} &middot;
-      channels {{ chunk.chan0 }}&ndash;{{ chunk.chanf }} &middot;
+      whole scan &middot;
       {{ nvalid }} baselines &middot;
       median {{ "%.2f"|format(median) }} &middot;
       worst {{ "%.2f"|format(worst) }}

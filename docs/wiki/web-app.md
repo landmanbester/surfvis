@@ -3,8 +3,8 @@ type: reference
 title: Chi-squared browser
 description: How surfvis serve links surfchi2 output to on-demand baseline waterfalls, the waterfall's correction / Stokes / flag-version controls, and the xarray-ms facts it depends on.
 tags: [web, fastapi, htmx, xarray-ms, zarr]
-timestamp: 2026-11-05
-last_verified_commit: 4e90452
+timestamp: 2026-11-06
+last_verified_commit: 5c7561c
 ---
 
 # Chi-squared browser
@@ -23,7 +23,7 @@ surfvis chi2 --dataout chi2.zarr   →  chi2.zarr        (numbers, not pictures)
                                           ↓ store.py
 surfvis serve --data chi2.zarr     →  heatmap grid + histogram
                                           ↓ click  → msdata.py
-                                      waterfall PNG   (read from the MS)
+                                      canvas waterfall (read from the MS)
 ```
 
 The MS's visibilities are read only when a waterfall is requested. Browsing the
@@ -31,23 +31,26 @@ grid reads the zarr plus two small MS subtables, `FIELD::NAME` for the field
 menu and `ANTENNA::POSITION` for baseline lengths (both cached; if the MS has
 moved they are left out rather than failing the page).
 
-`Chi2Store.chunk` indexes the one `(time bin, freq bin, product)` matrix before
-reading it, and groups are opened with `cache=False`. Reading `.values` on the
-whole variable loaded every bin of the scan, and xarray's default cache kept it:
-1.3 GB for one click on a MeerKAT-sized scan with `--ntimes 1`.
+`Chi2Store.matrix` reads one product's `(antenna, antenna)` matrix, and groups
+are opened with `cache=False`, so xarray never keeps a whole variable.
 
 ## The zarr contract
 
-One group per `(field, spw, scan)`, because the number of time and frequency
-bins differs between them:
+One group per `(field, spw, scan)`, holding that scan's totals:
 
 ```
 chi2.zarr/field{F}/spw{S}/scan{N}
-  chi2, counts        (time_bin, freq_bin, product, antenna1, antenna2)
-  t0/tf               time-slot bounds of each time bin, within the scan
-  chan0/chanf         channel bounds of each frequency bin
+  chi2, counts        (product, antenna1, antenna2), summed over the scan
   attrs               ms, rcol, wcol, fcol, mcol, gtable, corr_labels, antenna_names
 ```
+
+The browser looks at one field, spw and scan at a time. `--ntimes` and
+`--nfreqs` chunk the work in `chi2` (and its per-chunk PNGs), not the data
+product: stores used to keep every `(time bin, freq bin)` chunk, with bin
+bounds to outline the clicked chunk on the waterfall. That made the heatmap
+a fragment of a scan, and `chi2` held every scan's dense cube in memory
+until the end. Stores in the old layout still open: `store._scan_totals`
+sums their bins one time bin at a time.
 
 Two things are easy to get wrong here:
 
@@ -55,15 +58,12 @@ Two things are easy to get wrong here:
   any `--stokes` (`I`, `V`). They are resolved from `POLARIZATION::CORR_TYPE`,
   not offsets into `--use-corrs`, and the waterfall forms the same label from
   the MS. Stores written before products existed have a `corr` axis instead;
-  `Chi2Store.bins` refuses them with a message to rerun `chi2`.
-- **Bin bounds must be stored.** Without `t0`/`chan0` the app cannot outline the
-  clicked chunk on the scan's waterfall, and would have to re-derive the
-  chunking from `--ntimes`/`--nfreqs`.
+  `Chi2Store.products` refuses them with a message to rerun `chi2`.
 
 `surfchisq_products_plot` returns `(chi2, counts)`, each
 `(nproducts, nant, nant)`, and does not say which chunk it was.
 `core/chi2.py` therefore keys futures by `(ds, t, f)` in the parent --
-`futures[fut] = (i, t, f)` -- rather than changing the worker.
+`futures[fut] = (i, t, f)` -- and adds each into its scan's total.
 
 ## xarray-ms facts this depends on
 
@@ -88,9 +88,16 @@ Verified against the `0.4.0a*` line pinned in `pyproject.toml` (see
   maps (`DATA`, `WEIGHT_SPECTRUM`, `FLAG`), so both spellings work in the UI.
   It must translate **nothing else**: it once mapped `CORRECTED_DATA` to
   `VISIBILITY` too, so choosing `CORRECTED_DATA` plotted `DATA`.
-- **`data_groups` is attached by `open_datatree`, not `open_dataset`.** Hence
-  `msdata.data_group()` opens the tree once and caches it, while the per-chunk
-  reads use `open_dataset(partition_key=...)`.
+- **`data_groups` is attached by `open_datatree`, not `open_dataset`,** and
+  `msdata.data_group()` used to open the tree to read it. That opens every
+  partition, and for each xarray-ms reads the row shapes of every secondary
+  column and `np.unique`s them (`CorrelatedFactory.secondary_variables`): on a
+  real MS the first waterfall sat there for over ten minutes. The MSv2 backend
+  hard-codes the only group (`postprocess_datasets`: `base` is `VISIBILITY` /
+  `WEIGHT` / `FLAG`), so `data_group()` now returns that constant and opens
+  nothing. A test pins that a waterfall never calls `open_datatree`. Per-scan
+  reads use `open_dataset(partition_key=...)`, which pays that row-shape scan
+  for one partition only.
 - Columns that are *not* part of the MSv2 standard are surfaced automatically as
   secondary variables under their own names — which is exactly why `RESIDUAL` is
   plottable. Standard columns other than `DATA`/`WEIGHT_SPECTRUM` are dropped,
@@ -119,8 +126,8 @@ flag version, quantity. They recompute **the waterfall only**. The heatmap is
 what `chi2` measured, so the controls default to how it was formed (the zarr's
 `rcol`/`mcol`/`gtable` attrs and the selected product), and the panel shows a
 note once they no longer describe the same quantity. Recomputing the heatmap
-on the fly was ruled out: one chunk is every baseline across the chunk, which
-at MeerKAT scale is hundreds of MB per click.
+on the fly was ruled out: it is every baseline across the whole scan, which
+at MeerKAT scale is far too much to read per click.
 
 The plotted quantity is `inv(G_p) column inv(G_q)^H - model` formed into the
 product, via `utils/products.form` -- the same function `chi2` uses, so the two
@@ -181,8 +188,7 @@ histogram PNG is square, so the two render at the same size.
 The waterfall title carries the baseline length: the distance between the two
 `ANTENNA::POSITION` rows (ITRF metres), read once per MS with arcae
 (`msdata.baseline_length`). Its time axis is labelled in UTC; pixels stay in
-slot coordinates, since the chunk outline (and later, a flagging selection)
-uses them.
+slot coordinates, since flagging selections use them.
 
 The heatmap ships one JSON blob (`#grid-data`: antenna names, the χ²/dof
 matrix, antenna positions) rather than attributes on every cell. `app.js`
@@ -230,15 +236,16 @@ Three layers, because the slow part is not always an htmx request:
 
 - `#busy`, a bar across the top, is the `hx-indicator` for every htmx request
   (set once on `<body>`, inherited). It also stays lit while any `.plot.loading`
-  exists (`body:has(...)`), since the waterfall PNG is the slow part and its
+  exists (`body:has(...)`), since the waterfall's first block is the slow part and its
   panel is usually below the fold when a cell is clicked.
 - The region a request will replace (`#heatmap`, `#waterfall`, `#selectors`)
   is dimmed between `htmx:beforeRequest` and `htmx:afterRequest`.
-- The PNGs are not htmx requests, and the waterfall PNG is where the MS is
-  actually read. Each `<img data-plot>` sits in a `.plot.loading` wrapper
-  showing a spinner; `app.js` `fetch`es it on `htmx:afterSettle` and sets a
-  blob URL, so a failure's JSON detail arrives with the response. An
-  `onerror` handler used to re-request the URL to read it, redoing the read.
+- The histogram PNG is not an htmx request. Its `<img data-plot>` sits in a
+  `.plot.loading` wrapper showing a spinner; `app.js` `fetch`es it on
+  `htmx:afterSettle` and sets a blob URL, so a failure's JSON detail arrives
+  with the response (an `onerror` handler used to re-request the URL to read
+  it). The canvas waterfall fetches its own blocks and clears its wrapper's
+  `.loading` when the first one is drawn.
 - Cells inherit `hx-sync="this:replace"` from `.grid`: a new click or arrow
   key aborts the previous waterfall request, so the outlined cell and the
   waterfall cannot disagree. The heatmap is loaded once, by the selector
@@ -253,6 +260,124 @@ the old one with new HTML after an upgrade: no indicators, an unsized
 histogram.
 
 The selected cell keeps an outline (`.selected`) across heatmap re-renders.
+
+## Manual flagging (write path)
+
+Design: issue #16. Source: `web/flagging.py`, the `/flag*` routes in `app.py`.
+The canvas waterfall is in place, but it has no selection tool yet (step 3 of
+#16), so the routes are driven by JSON.
+
+- **Selections are polygons** in the waterfall's (time slot, channel) data
+  coordinates; a rectangle is four vertices. `rasterise` selects a cell when
+  its centre `(i, j)` is inside, by even-odd, with half-open edges, so a
+  rectangle around slots `t0..t1` and channels `c0..c1` has corners at
+  `t - 0.5` / `c + 0.5`. The server's mask is what is written; a client preview
+  must use the same rule.
+- **`POST /flag`** takes `{field, spw, scan, p, q, product, vertices,
+  correlations, dry_run}`. `correlations` is `product` (those the plotted
+  product is formed from: XX and YY for I) or `all`. Rows are found with
+  `msdata.baseline_rows` (arcae TaQL, shared with the flag-version reader) and
+  mapped to slots with `msdata.slot_index`, in the antenna order the MS
+  stores (`msdata.stored_order`): a baseline stored both ways in one
+  partition is two baselines, and flagging one leaves the other. `FLAG_ROW`
+  is only ever set (`FLAG_ROW | all(FLAG)`); recomputing it as `all(FLAG)`
+  used to unflag rows flagged through FLAG_ROW alone. 403 without
+  `--allow-flagging`; 400 for an empty or unformable selection; 422 for
+  fewer than three vertices or a negative antenna index; 503 while the backup
+  is being written.
+- **xarray-ms mislabels reversed baselines.** A baseline stored as (2, 0) is
+  labelled (0, 2) by `baseline_antenna1/2_name`, but its data stay V_20,
+  unconjugated. So the waterfall and the flag writer take the antenna order
+  from the MS (`stored_order`), never from those labels: gains, cross-hand
+  labels and rows all follow the data.
+- **Backup.** Before any write, FLAG and FLAG_ROW are saved as a CASA flag
+  version, `surfvis_before_<UTC to the microsecond>` (seconds alone let two
+  sessions collide). `serve --allow-flagging` starts it in a background
+  thread at startup: copying the column takes minutes on a large MS (about
+  335 M cells/s, so ~50 min for 8 h of 32k-channel MeerKAT data), far too long
+  for one HTTP request. Writes answer 503 until it is done, `/flag/state`
+  reports `backup_state`, and a failed backup disables writing. `Flagger`
+  used directly takes it synchronously on the first write. It is written via `Table.from_descriptor` with the
+  source's column descriptors, copied one `DATA_DESC_ID` run at a time in
+  ~256 MB chunks. Keep arcae's `_c_order` hint in the descriptor: without it
+  a tiled FLAG column's fixed cell shape is read transposed and the copy fails.
+  TaQL `SELECT ... GIVING ... AS PLAIN` was rejected: it copies every subtable
+  and labels the result a Measurement Set.
+- **Undo** (`POST /flag/undo`) clears exactly the cells the last edit turned
+  on, reading the rows as they are now, and recomputes FLAG_ROW only for rows
+  that edit flagged; 409 when empty. An edit records the changed cells'
+  indices, not row snapshots: snapshots both wiped later writes by
+  `flag-chi2`, CASA or another server, and cost ~59 MB per MeerKAT
+  baseline-scan. A write that fails half-way is put back before the error is
+  raised. The stack is per process; the backup version is the durable
+  fallback. `GET /flag/state` lists the edits.
+- After a write `msdata.invalidate(ms)` drops the caches, so the next
+  waterfall shows the new flags even within one mtime tick. Writes go through
+  a separate arcae handle in the same process as xarray-ms's read handle;
+  casacore shares the underlying table, and the tests confirm reads see writes.
+- `Flagger` serialises apply/undo with a lock: FastAPI runs sync routes in a
+  thread pool.
+
+## Profiling (`serve --profile DIR`)
+
+`web/profiling.py`. Off by default, and then a `span()` costs one context
+variable lookup. With a directory:
+
+- `ProfileMiddleware` gives each request a span list in a `ContextVar`.
+  Starlette copies the context into the worker thread a sync route runs in, so
+  `span()` / `@timed()` anywhere in `msdata`, `store` or `app` lands on the
+  request that caused it. Spans nest (indent = depth) and are listed in the
+  order they *finished*, so a parent follows its children.
+- Each response carries `Server-Timing` (the browser's network panel draws
+  it); one block per request goes to stderr and a JSON line to
+  `DIR/spans.jsonl`. `python -m surfvis.web.profiling DIR` totals by span.
+- Routes are wrapped in `@profiling.cprofiled`, which runs cProfile in the
+  route's own thread (cProfile sees only the thread that enabled it) and dumps
+  `DIR/<time>-<route>.prof` when the request took over `SLOW` (1 s). One
+  profiler at a time: an overlapping request just isn't cProfiled.
+
+Spans sit on the cache *misses* (`@timed` below `@lru_cache`), so a hit does
+not appear at all. The expensive ones to watch: `data_group: open_datatree`
+(opens every partition of the MS), `open_partition`, `baseline_rows` (two
+TaQL queries per waterfall via `stored_order`), and the column reads.
+
+Requests are only printed when they finish, so a watchdog thread reports any
+request running longer than `STUCK` (10 s), every 10 s, with the spans it is
+inside; `kill -USR1 <pid>` dumps every thread's stack via `faulthandler`.
+`templates.TemplateResponse` is wrapped as a `render template` span. cProfile
+roughly doubles pure-Python time (Jinja especially), so read totals from a
+`--profile` run as upper bounds.
+
+First finding, on com08: the first `/waterfall` hung for over ten minutes in
+`data_group` → `open_datatree` (see "xarray-ms facts" above), and opened it
+twice. Fixed by not opening the datatree at all.
+
+Second round, same MS (10.9 M rows, 64 antennas, 9 secondary columns):
+
+| Cost | Where | Now |
+|---|---|---|
+| 4.6 s per heatmap | `render.cell_colours` called the matplotlib norm per cell, through numpy masked arrays | one vectorised call; a test pins it matches `to_hex(cmap(norm(v)))` cell for cell |
+| 7.5 s x 2 per waterfall | `baseline_rows` ran a TaQL query over the whole main table, twice when the click was in the unstored order | `scan_rows()` reads (ANTENNA1, ANTENNA2, ROWID, TIME) for the scan once; `baseline_rows` selects from it |
+| 37 s per scan | `open_partition`: 22.6 s building xarray-ms's structure (once per MS; 15 s of it partitioning the rows), 14.4 s `secondary_variables` row-shape `np.unique` per column (every scan) | hidden: `/heatmap` warms its scan in the background |
+
+**Scan rows** are keyed on `table.dat`'s mtime and size, not the storage
+fingerprint, and `invalidate()` leaves them: a FLAG write does not move rows.
+
+**Warm-up.** `/heatmap` calls `msdata.warm()`: one worker thread opens the
+partition and reads its scan rows while the heatmap is on screen. Only the
+latest request runs (a queued one that was overtaken is skipped), so flicking
+through scans does not queue reads. `create_app(warm=False)` turns it off.
+With profiling on it prints `[profile] warmed field F spw S scan N: ...`.
+
+**Coalescing.** `msdata._Coalescer.hold(key, what)` gives `_open`,
+`scan_rows` and `cached_plane` a per-key lock, so a request that arrives while
+the warm-up is reading waits for it instead of repeating it; the wait shows as
+`<what>: wait` (only when it actually waited).
+
+**Still open:** `invalidate()` (called by the flagger after every write)
+clears xarray-ms's multiton, so the next waterfall rebuilds its structure and
+reopens the scan -- tens of seconds on a large MS. Step 3's flag-and-redraw
+loop needs that fixed first.
 
 ## Colour scaling
 
@@ -294,3 +419,63 @@ time, channel and antenna -- so the corrections are checked exactly.
 
 Tests skip cleanly without the `[full,web]` extras; `tests/conftest.py` carries
 the `needs_ms` / `needs_web` markers.
+
+## Canvas waterfall
+
+The page no longer shows `/waterfall.png` (the route is kept, unused by the
+page). `templates/_waterfall.html` renders a `.wf` root with a `<canvas>`;
+`app.js` imports `static/wf/widget.mjs` on `htmx:afterSettle` of `#waterfall`
+and calls `mount(root)`.
+
+- **Route:** `GET /waterfall.bin` takes the PNG route's query plus
+  `t0,t1,c0,c1,max_t,max_c,meta`. The plane is reduced to at most
+  `max_t x max_c` cells (`planes.py`); the first request sets `meta=true` and
+  also returns slot times and channel frequencies.
+- **Wire format:** a JSON header (version, nt, nc, window, tstep, cstep, vmin,
+  vmax, quantity, colormap, title, rect) followed by float32 values and uint8
+  flag fractions; decoded by `static/wf/format.mjs`.
+- **Modules** (`static/wf/`, node-tested via `tests/test_js.py`): `format`,
+  `luts`, `colormap` (paint), `view` (View, Latest, niceTicks, wheelFactor), `widget`.
+- **Interactions:** wheel zooms about the cursor, shift-drag or middle-drag
+  pans, `0` or Reset view resets, hover reads time, frequency, value and flag
+  percentage. After 150 ms of rest the visible window is refetched at screen
+  resolution; `Latest` discards stale responses. "show flags" repaints locally.
+  Plain left-drag and click are unbound, reserved for flagging polygons.
+  Layers added through `api.addLayer(fn)` draw clipped to the plot area.
+- **Cache:** static files are served `Cache-Control: no-cache`
+  (`RevalidatedStaticFiles`), because imports between ES modules cannot carry
+  the `?v=` digest.
+- Save as PNG captures the canvas too (a canvas is rasterised by html-to-image).
+- **Wheel units:** `wheelFactor` normalises `deltaY` by `deltaMode` (Firefox
+  reports lines, not pixels) and clamps each event, so zoom feels alike across
+  browsers. The widget aborts a superseded fetch, skips a refetch when the
+  block on screen was fetched with the same window and bin counts (so the first
+  load makes one request), and drops a drag when pointer capture is lost.
+
+### Plane cache
+
+`msdata.cached_plane` keeps the last four formed baseline planes (an `lru_cache`)
+so zooming and panning re-slice memory instead of re-reading the MS. The key is
+the MS fingerprint (storage mtimes), the gain term's mtime, and the baseline and
+settings (field, spw, scan, antennas, product, column, model, gtable, flag
+version). It is **not** keyed on quantity or on the heatmap's product, so
+another quantity, or the same baseline reached from another heatmap, hits the
+cache. `invalidate(ms)` clears it (the flagger
+calls it after a write). An entry holds the plane as complex64 and the flags as
+bool, `values` is dropped: about 9 bytes per cell, so 450 x 32768 is ~130 MB and
+four entries ~0.5 GB. Colour limits are cached per quantity on the entry
+(`Waterfall.limits`), so colours do not move on zoom and are not recomputed.
+
+Concurrent misses for the same plane (two tabs, a quick double click) wait on
+a per-key lock (`_Coalescer`) for the first read rather than each reading the MS;
+`lru_cache` does not coalesce them. A miss still peaks at roughly 1-2 GB at
+MeerKAT scale while the plane is formed; the waterfall passes `weight=None`
+to `products.form`, so unit weights are a broadcast view rather than a
+float64 array per correlation.
+
+The widget registers its document-level listeners with one
+`AbortController` and tears them down (with its `ResizeObserver` and any
+in-flight fetch) on the `htmx:beforeSwap` that replaces the panel. Until the
+next keypress, an old panel used to stay reachable from a `keydown` listener,
+holding its blocks and offscreen canvas.
+`planes._binned` skips its padded copy when the window divides evenly.

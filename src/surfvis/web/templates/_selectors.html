@@ -29,18 +29,6 @@
     </select>
   </label>
 
-  <label>time bin
-    <select name="t" class="binsel">
-      {% for value in times %}<option value="{{ value }}" {% if value == t %}selected{% endif %}>{{ value }}</option>{% endfor %}
-    </select>
-  </label>
-
-  <label>freq bin
-    <select name="f" class="binsel">
-      {% for value in freqs %}<option value="{{ value }}" {% if value == f %}selected{% endif %}>{{ value }}</option>{% endfor %}
-    </select>
-  </label>
-
   <label>product
     <select name="c" class="binsel">
       {% for value in corrs %}<option value="{{ value }}" {% if value == c %}selected{% endif %}>{{ value }}</option>{% endfor %}

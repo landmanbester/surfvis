@@ -3,6 +3,7 @@
 import hashlib
 import os
 from pathlib import Path
+from typing import Literal
 from urllib.parse import urlencode
 
 import numpy as np
@@ -10,9 +11,12 @@ from fastapi import FastAPI, HTTPException, Query, Request
 from fastapi.responses import HTMLResponse, Response
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
+from pydantic import BaseModel, Field
 
 from surfvis.utils import gains as gains_mod
-from surfvis.web import msdata, render
+from surfvis.utils import products as products_mod
+from surfvis.web import msdata, planes, profiling, render
+from surfvis.web.flagging import BackupPendingError, Flagger
 from surfvis.web.store import Chi2Store, Selection
 
 HERE = Path(__file__).parent
@@ -20,18 +24,58 @@ HERE = Path(__file__).parent
 # How `surfvis serve --reload` hands its options to the worker uvicorn
 # re-imports: reload needs an import string, not an app object.
 ENV_DATA, ENV_MS, ENV_GTABLES = "SURFVIS_SERVE_DATA", "SURFVIS_SERVE_MS", "SURFVIS_SERVE_GTABLES"
+ENV_FLAGGING = "SURFVIS_SERVE_ALLOW_FLAGGING"
+ENV_PROFILE = "SURFVIS_SERVE_PROFILE"
+
+
+class FlagRequest(BaseModel):
+    """A polygon on one baseline's waterfall, in its (time slot, channel) coordinates."""
+
+    field: int
+    spw: int
+    scan: int
+    # Non-negative: a negative index would wrap and flag another baseline.
+    p: int = Field(ge=0)
+    q: int = Field(ge=0)
+    product: str
+    vertices: list[tuple[float, float]] = Field(min_length=3)
+    # "product": the correlations the plotted product is formed from; "all": every correlation.
+    correlations: Literal["product", "all"] = "product"
+    dry_run: bool = False
+
+
+class RevalidatedStaticFiles(StaticFiles):
+    """Static files the browser must revalidate (by ETag) on every use.
+
+    The ``?v=`` digest busts caches for files the page names, but imports
+    between ES modules under ``static/wf/`` cannot carry it.
+    """
+
+    def file_response(self, *args, **kwargs):
+        response = super().file_response(*args, **kwargs)
+        response.headers["Cache-Control"] = "no-cache"
+        return response
 
 
 def app_from_env() -> FastAPI:
     """The app :func:`create_app` builds, configured from the environment."""
     gtables = [g for g in os.environ.get(ENV_GTABLES, "").split(os.pathsep) if g]
-    return create_app(os.environ[ENV_DATA], os.environ.get(ENV_MS) or None, gtables=gtables)
+    return create_app(
+        os.environ[ENV_DATA],
+        os.environ.get(ENV_MS) or None,
+        gtables=gtables,
+        allow_flagging=bool(os.environ.get(ENV_FLAGGING)),
+        profile=os.environ.get(ENV_PROFILE) or None,
+    )
 
 
 def create_app(
     data: str | Path,
     ms: str | Path | None = None,
     gtables: list[str] | None = None,
+    allow_flagging: bool = False,
+    profile: str | Path | None = None,
+    warm: bool = True,
 ) -> FastAPI:
     """Build the app around one chi-squared dataset.
 
@@ -43,24 +87,36 @@ def create_app(
             used and any found in ``*.qc`` directories next to the MS. No
             other path is opened: the server has no authentication, so a
             query string must not be able to name arbitrary directories.
+        allow_flagging: Enable the routes that write FLAG. Off by default:
+            the browser is read-only unless asked otherwise.
+        profile: Directory to write request timings and cProfile dumps of
+            slow requests to (see :mod:`surfvis.web.profiling`). Off if None.
+        warm: Open a scan and read its rows in the background while its
+            heatmap is on screen, so the first waterfall does not wait for
+            that (on a large MS, the better part of a minute).
 
     Returns:
         A configured :class:`fastapi.FastAPI` instance.
     """
+    profiling.enable(profile)
     store = Chi2Store(data)
     app = FastAPI(title="surfvis")
-    app.mount("/static", StaticFiles(directory=HERE / "static"), name="static")
+    app.add_middleware(profiling.ProfileMiddleware)
+    app.mount("/static", RevalidatedStaticFiles(directory=HERE / "static"), name="static")
     templates = Jinja2Templates(directory=HERE / "templates")
     # StaticFiles sends no Cache-Control, so browsers cache by heuristic and
     # keep serving an old stylesheet after an upgrade. A version in the URL
     # makes every change a new resource.
     templates.env.globals["static_version"] = _static_version(HERE / "static")
+    # Jinja renders inside TemplateResponse; the heatmap's thousands of cells make that a real cost.
+    templates.TemplateResponse = profiling.timed("render template")(templates.TemplateResponse)
 
     first = store.scans[0]
-    ms_path = str(ms) if ms is not None else store.chunk(Selection(*first, 0, 0, store.bins(*first)[2][0])).ms
+    ms_path = str(ms) if ms is not None else store.matrix(Selection(*first, store.products(*first)[0])).ms
 
-    recorded = sorted({store.chunk_attrs(*key).get("gtable", "") for key in store.scans} - {""})
+    recorded = sorted({store.attrs(*key).get("gtable", "") for key in store.scans} - {""})
 
+    @profiling.timed("gain_tables")
     def _gain_tables() -> dict[str, str]:
         """Offered gain terms, as {real path: spelling shown}. Re-scanned per request, so new solves appear."""
         listed = list(recorded) + list(gtables or []) + gains_mod.find_terms(str(Path(ms_path).resolve().parent))
@@ -72,40 +128,35 @@ def create_app(
     def _allowed(gtable: str) -> bool:
         return not gtable or os.path.realpath(gains_mod.term_path(gtable)) in _gain_tables()
 
-    def _selection(field, spw, scan, t, f, c) -> Selection:
-        return Selection(field=field, spw=spw, scan=scan, time_bin=t, freq_bin=f, product=c)
-
-    def _chunk(field, spw, scan, t, f, c):
+    @profiling.timed("store.matrix")
+    def _matrix(field, spw, scan, c):
         try:
-            return store.chunk(_selection(field, spw, scan, t, f, c))
+            return store.matrix(Selection(field=field, spw=spw, scan=scan, product=c))
         except (KeyError, IndexError, ValueError) as exc:
-            raise HTTPException(status_code=404, detail=f"No such chunk: {exc}") from exc
+            raise HTTPException(status_code=404, detail=f"No such scan or product: {exc}") from exc
 
-    def _baseline(chunk, p, q) -> tuple[str, str]:
-        names = chunk.antenna_names
+    def _baseline(matrix, p, q) -> tuple[str, str]:
+        names = matrix.antenna_names
         if not (p < len(names) and q < len(names)):
             raise HTTPException(status_code=404, detail=f"No antenna pair ({p}, {q}); there are {len(names)} antennas")
         return names[p], names[q]
 
-    def _selectors(request, field, spw, scan, t=0, f=0, c="", scale="log"):
-        times, freqs, corrs = store.bins(field, spw, scan)
+    def _selectors(request, field, spw, scan, c="", scale="log"):
+        corrs = store.products(field, spw, scan)
         return {
             "store": store,
             "field_names": msdata.field_names(ms_path),
             "field": field,
             "spw": spw,
             "scan": scan,
-            "times": times,
-            "freqs": freqs,
             "corrs": corrs,
-            # Keep the bin, product and scale across a change of scan where they still exist.
-            "t": t if t in times else times[0],
-            "f": f if f in freqs else freqs[0],
+            # Keep the product and scale across a change of scan where they still exist.
             "c": c if c in corrs else corrs[0],
             "scale": scale if scale in render.SCALES else "log",
         }
 
     @app.get("/", response_class=HTMLResponse)
+    @profiling.cprofiled
     def index(request: Request):
         field, spw, scan = store.scans[0]
         return templates.TemplateResponse(
@@ -113,17 +164,16 @@ def create_app(
         )
 
     @app.get("/scans", response_class=HTMLResponse)
+    @profiling.cprofiled
     def scans(
         request: Request,
         field: int = Query(...),
         spw: int = Query(...),
         scan: int | None = Query(None),
-        t: int = Query(0),
-        f: int = Query(0),
         c: str = Query(""),
         scale: str = Query("log"),
     ):
-        """Re-render the selectors when field, spw or scan changes: each scan has its own bins."""
+        """Re-render the selectors when field, spw or scan changes: each scan has its own products."""
         if field not in store.fields:
             raise HTTPException(status_code=404, detail=f"No field {field}")
         spws = store.spws(field)
@@ -132,51 +182,50 @@ def create_app(
         numbers = store.scan_numbers(field, spw)
         if scan not in numbers:
             scan = numbers[0]
-        return templates.TemplateResponse(
-            request, "_selectors.html", _selectors(request, field, spw, scan, t, f, c, scale)
-        )
+        return templates.TemplateResponse(request, "_selectors.html", _selectors(request, field, spw, scan, c, scale))
 
     @app.get("/heatmap", response_class=HTMLResponse)
+    @profiling.cprofiled
     def heatmap(
         request: Request,
         field: int = Query(...),
         spw: int = Query(...),
         scan: int = Query(...),
-        t: int = Query(0, ge=0),
-        f: int = Query(0, ge=0),
         c: str = Query(...),
         scale: str = Query("log"),
     ):
-        chunk = _chunk(field, spw, scan, t, f, c)
+        matrix = _matrix(field, spw, scan, c)
+        if warm:
+            msdata.warm(ms_path, field, spw, scan)
 
         try:
-            norm, vmin, vmax = render.make_norm(chunk.chi2_dof, scale)
+            norm, vmin, vmax = render.make_norm(matrix.chi2_dof, scale)
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
-        colours = render.cell_colours(chunk.chi2_dof, norm)
-        finite = chunk.finite
+        colours = render.cell_colours(matrix.chi2_dof, norm)
+        finite = matrix.finite
         # What the hover readout and keyboard navigation need, sent once
         # rather than as attributes on every cell.
         grid = {
-            "names": chunk.antenna_names,
-            "values": [[None if np.isnan(v) else round(float(v), 4) for v in row] for row in chunk.chi2_dof],
-            "positions": msdata.antenna_positions(ms_path, chunk.antenna_names),
+            "names": matrix.antenna_names,
+            "values": [[None if np.isnan(v) else round(float(v), 4) for v in row] for row in matrix.chi2_dof],
+            "positions": msdata.antenna_positions(ms_path, matrix.antenna_names),
         }
         return templates.TemplateResponse(
             request,
             "_heatmap.html",
             {
-                "chunk": chunk,
+                "matrix": matrix,
                 "colours": colours,
-                "names": chunk.antenna_names,
-                "nant": len(chunk.antenna_names),
+                "names": matrix.antenna_names,
+                "nant": len(matrix.antenna_names),
                 "vmin": vmin,
                 "vmax": vmax,
                 "scale": scale,
-                "nvalid": chunk.nbaselines,
-                "worst": float(np.nanmax(chunk.chi2_dof)) if finite.size else float("nan"),
+                "nvalid": matrix.nbaselines,
+                "worst": float(np.nanmax(matrix.chi2_dof)) if finite.size else float("nan"),
                 "median": float(np.median(finite)) if finite.size else float("nan"),
-                "query": urlencode({"field": field, "spw": spw, "scan": scan, "t": t, "f": f, "c": c}),
+                "query": urlencode({"field": field, "spw": spw, "scan": scan, "c": c}),
                 "scales": render.SCALES,
                 "product": c,
                 "grid": grid,
@@ -184,21 +233,21 @@ def create_app(
         )
 
     @app.get("/histogram.png")
+    @profiling.cprofiled
     def histogram_png(
         field: int = Query(...),
         spw: int = Query(...),
         scan: int = Query(...),
-        t: int = Query(0, ge=0),
-        f: int = Query(0, ge=0),
         c: str = Query(...),
         scale: str = Query("log"),
     ):
-        chunk = _chunk(field, spw, scan, t, f, c)
+        matrix = _matrix(field, spw, scan, c)
         try:
-            norm, _, _ = render.make_norm(chunk.chi2_dof, scale)
+            norm, _, _ = render.make_norm(matrix.chi2_dof, scale)
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
-        png = render.histogram_png(chunk.chi2_dof, norm)
+        with profiling.span("render histogram"):
+            png = render.histogram_png(matrix.chi2_dof, norm)
         return Response(png, media_type="image/png")
 
     def _resolve(column: str) -> str:
@@ -210,29 +259,28 @@ def create_app(
         except Exception:
             return column
 
-    def _waterfall_settings(chunk, product, column, model, gtable, flagversion, quantity):
+    def _waterfall_settings(matrix, product, column, model, gtable, flagversion, quantity):
         """Fill unset waterfall controls from how chi2 formed the heatmap.
 
         ``None`` means "not given", so the heatmap's setting applies; an empty
         string is a deliberate "none" (no model, no gains).
         """
         return {
-            "product": product or chunk.selection.product,
-            "column": _resolve(column or chunk.rcol),
-            "model": _resolve(chunk.mcol if model is None else model),
-            "gtable": chunk.gtable if gtable is None else gtable.strip(),
+            "product": product or matrix.selection.product,
+            "column": _resolve(column or matrix.rcol),
+            "model": _resolve(matrix.mcol if model is None else model),
+            "gtable": matrix.gtable if gtable is None else gtable.strip(),
             "flagversion": flagversion or "",
             "quantity": quantity,
         }
 
     @app.get("/waterfall", response_class=HTMLResponse)
+    @profiling.cprofiled
     def waterfall(
         request: Request,
         field: int = Query(...),
         spw: int = Query(...),
         scan: int = Query(...),
-        t: int = Query(..., ge=0),
-        f: int = Query(..., ge=0),
         c: str = Query(...),
         p: int = Query(..., ge=0),
         q: int = Query(..., ge=0),
@@ -249,10 +297,10 @@ def create_app(
         computed, so the panel says when the two no longer describe the same
         quantity.
         """
-        chunk = _chunk(field, spw, scan, t, f, c)
-        name1, name2 = _baseline(chunk, p, q)
-        settings = _waterfall_settings(chunk, product, column, model, gtable, flagversion, quantity)
-        base = {"field": field, "spw": spw, "scan": scan, "t": t, "f": f, "c": c, "p": p, "q": q}
+        matrix = _matrix(field, spw, scan, c)
+        name1, name2 = _baseline(matrix, p, q)
+        settings = _waterfall_settings(matrix, product, column, model, gtable, flagversion, quantity)
+        base = {"field": field, "spw": spw, "scan": scan, "c": c, "p": p, "q": q}
         offered = _gain_tables()
         if not _allowed(settings["gtable"]):
             problems = [
@@ -271,7 +319,7 @@ def create_app(
                 gtable=settings["gtable"],
                 flagversion=settings["flagversion"],
             )
-        defaults = _waterfall_settings(chunk, "", "", None, None, "", "amp")
+        defaults = _waterfall_settings(matrix, "", "", None, None, "", "amp")
         # Controls the user moved off the heatmap's setting. Clicking another
         # cell sends these along, so a choice survives a change of baseline.
         keep = {key for key, value in settings.items() if value != defaults[key]}
@@ -284,7 +332,7 @@ def create_app(
                 "name1": name1,
                 "name2": name2,
                 "gtables": list(offered.values()),
-                "value": float(chunk.chi2_dof[p, q]),
+                "value": float(matrix.chi2_dof[p, q]),
                 # The column is corrected and has a model subtracted, so only
                 # visibility-like columns make sense; WEIGHT does not.
                 "columns": _columns(ms_path, field, spw, scan, complex_only=True),
@@ -293,24 +341,19 @@ def create_app(
                 "flagversions": msdata.flag_versions(ms_path),
                 "quantities": msdata.QUANTITIES,
                 "s": settings,
-                "chunk": chunk,
+                "matrix": matrix,
                 "keep": keep,
                 "differs": bool(keep - {"quantity"}),
                 "problems": problems,
-                "t0": chunk.t0,
-                "tf": chunk.tf,
-                "chan0": chunk.chan0,
-                "chanf": chunk.chanf,
             },
         )
 
     @app.get("/waterfall.png")
+    @profiling.cprofiled
     def waterfall_png(
         field: int = Query(...),
         spw: int = Query(...),
         scan: int = Query(...),
-        t: int = Query(..., ge=0),
-        f: int = Query(..., ge=0),
         c: str = Query(...),
         p: int = Query(..., ge=0),
         q: int = Query(..., ge=0),
@@ -321,9 +364,9 @@ def create_app(
         flagversion: str = Query(""),
         quantity: str = Query("amp"),
     ):
-        chunk = _chunk(field, spw, scan, t, f, c)
-        name1, name2 = _baseline(chunk, p, q)
-        settings = _waterfall_settings(chunk, product, column, model, gtable, flagversion, quantity)
+        matrix = _matrix(field, spw, scan, c)
+        name1, name2 = _baseline(matrix, p, q)
+        settings = _waterfall_settings(matrix, product, column, model, gtable, flagversion, quantity)
         if not _allowed(settings["gtable"]):
             raise HTTPException(status_code=403, detail="That gain table is not one this server offers.")
         try:
@@ -334,16 +377,168 @@ def create_app(
                 scan=scan,
                 name1=name1,
                 name2=name2,
-                rect=(chunk.t0, chunk.tf, chunk.chan0, chunk.chanf),
+                rect=None,
                 **settings,
             )
         except (KeyError, ValueError, FileNotFoundError) as exc:
             raise HTTPException(status_code=404, detail=str(exc)) from exc
-        return Response(render.waterfall_png(wf), media_type="image/png")
+        with profiling.span("render png"):
+            png = render.waterfall_png(wf)
+        return Response(png, media_type="image/png")
+
+    @app.get("/waterfall.bin")
+    @profiling.cprofiled
+    def waterfall_bin(
+        field: int = Query(...),
+        spw: int = Query(...),
+        scan: int = Query(...),
+        c: str = Query(...),
+        p: int = Query(..., ge=0),
+        q: int = Query(..., ge=0),
+        product: str = Query(""),
+        column: str = Query(""),
+        model: str | None = Query(None),
+        gtable: str | None = Query(None),
+        flagversion: str = Query(""),
+        quantity: str = Query("amp"),
+        t0: int = Query(0),
+        t1: int | None = Query(None),
+        c0: int = Query(0),
+        c1: int | None = Query(None),
+        max_t: int = Query(1024),
+        max_c: int = Query(1024),
+        meta: bool = Query(False),
+    ):
+        """A window of one baseline's waterfall, reduced to at most max_t x max_c bins, for the canvas."""
+        if quantity not in msdata.QUANTITIES:
+            raise HTTPException(status_code=400, detail=f"quantity must be one of {msdata.QUANTITIES}")
+        matrix = _matrix(field, spw, scan, c)
+        name1, name2 = _baseline(matrix, p, q)
+        settings = _waterfall_settings(matrix, product, column, model, gtable, flagversion, quantity)
+        settings.pop("quantity")
+        if not _allowed(settings["gtable"]):
+            raise HTTPException(status_code=403, detail="That gain table is not one this server offers.")
+        try:
+            wf = msdata.cached_plane(
+                ms_path,
+                field,
+                spw,
+                scan,
+                name1,
+                name2,
+                **settings,
+            )
+        except (KeyError, IndexError, ValueError, FileNotFoundError) as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+        ntime, nchan = wf.plane.shape
+        t0, t1 = max(t0, 0), min(ntime if t1 is None else t1, ntime)
+        c0, c1 = max(c0, 0), min(nchan if c1 is None else c1, nchan)
+        if t0 >= t1 or c0 >= c1:
+            raise HTTPException(status_code=400, detail=f"Empty window: slots {t0}-{t1}, channels {c0}-{c1}")
+        cap = planes.MAX_BINS
+        with profiling.span("reduce_block"):
+            block = planes.reduce_block(
+                wf.plane, wf.flags, quantity, t0, t1, c0, c1, min(max(max_t, 1), cap), min(max(max_c, 1), cap)
+            )
+        if quantity not in wf.limits:  # cached with the plane; colours do not move on zoom
+            with profiling.span("colour_limits"):
+                wf.limits[quantity] = planes.colour_limits(wf.plane, wf.flags, quantity)
+        vmin, vmax = wf.limits[quantity]
+        length = f" ({wf.length:.0f} m)" if wf.length is not None else ""
+        header = {
+            "t0": t0,
+            "t1": t1,
+            "c0": c0,
+            "c1": c1,
+            "tstep": block.tstep,
+            "cstep": block.cstep,
+            "ntime": ntime,
+            "nchan": nchan,
+            "vmin": vmin,
+            "vmax": vmax,
+            "quantity": quantity,
+            "colormap": "twilight" if quantity == "phase" else "viridis",
+            "title": f"{wf.antenna1}-{wf.antenna2}{length}   scan {wf.scan}   {wf.column}   {quantity}   {wf.product}",
+        }
+        if meta:
+            header["times"] = [float(x) for x in wf.times] if wf.times is not None else None
+            header["freqs"] = [float(x) for x in wf.freqs] if wf.freqs is not None else None
+        with profiling.span("encode"):
+            body = planes.encode(header, block)
+        return Response(
+            body,
+            media_type="application/octet-stream",
+            headers={"Cache-Control": "no-store"},
+        )
+
+    flagger = Flagger(ms_path) if allow_flagging else None
+    if flagger is not None:
+        # Copying FLAG takes minutes on a large MS; do it now, not inside the first /flag request.
+        flagger.start_backup()
+
+    def _flagger() -> Flagger:
+        if flagger is None:
+            raise HTTPException(status_code=403, detail="Flagging is disabled; start serve with --allow-flagging")
+        return flagger
+
+    @app.post("/flag")
+    @profiling.cprofiled
+    def flag(req: FlagRequest):
+        """Flag the cells inside a polygon on one baseline, or count them with ``dry_run``."""
+        flagger_ = _flagger()
+        try:
+            names = list(store.group(req.field, req.spw, req.scan).attrs["antenna_names"])
+            labels = msdata.labels(ms_path, req.field, req.spw, req.scan)
+            if req.correlations == "all":
+                corr_idx = list(range(len(labels)))
+            else:
+                corr_idx = [labels.index(c) for c in products_mod.needed([req.product], labels)]
+            return flagger_.apply(
+                req.field,
+                req.spw,
+                req.scan,
+                names[req.p],
+                names[req.q],
+                np.asarray(req.vertices, dtype=float),
+                corr_idx,
+                dry_run=req.dry_run,
+            )
+        except BackupPendingError as exc:
+            raise HTTPException(status_code=503, detail=str(exc), headers={"Retry-After": "10"}) from exc
+        except (KeyError, IndexError, FileNotFoundError) as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        except RuntimeError as exc:
+            raise HTTPException(status_code=503, detail=str(exc)) from exc
+
+    @app.post("/flag/undo")
+    def flag_undo():
+        """Restore the cells the most recent flag edit changed."""
+        edit = _flagger().undo()
+        if edit is None:
+            raise HTTPException(status_code=409, detail="Nothing to undo")
+        return {"undone": edit.id, "description": edit.description, "cells": edit.cells}
+
+    @app.get("/flag/state")
+    def flag_state():
+        if flagger is None:
+            return {"enabled": False}
+        return {
+            "enabled": True,
+            "backup": flagger.backup,
+            "backup_state": flagger.backup_state,
+            "backup_error": flagger.backup_error,
+            "edits": [
+                {"id": e.id, "description": e.description, "cells": e.cells, "newly_flagged": e.newly_flagged}
+                for e in flagger.edits
+            ],
+        }
 
     @app.get("/healthz")
     def healthz():
-        return {"status": "ok", "scans": len(store.scans), "ms": ms_path}
+        return {"status": "ok", "scans": len(store.scans), "ms": ms_path, "flagging": flagger is not None}
 
     return app
 

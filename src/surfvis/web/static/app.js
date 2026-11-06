@@ -67,6 +67,14 @@ document.body.addEventListener("htmx:afterSettle", (e) => {
   }
 });
 
+// The waterfall panel is drawn by static/wf/widget.mjs; mount it whenever the panel is (re)rendered.
+document.body.addEventListener("htmx:afterSettle", (e) => {
+  if (e.detail.target.id !== "waterfall") return;
+  const root = e.detail.target.querySelector(".wf[data-src]");
+  if (!root) return;
+  import(root.dataset.module).then((m) => m.mount(root));
+});
+
 // Hover: a tooltip at the cursor and the readout under the grid, both naming
 // the antennas with their numbers (the grid index is the ANTENNA row).
 function describe(cell) {
@@ -172,7 +180,7 @@ function pageName() {
     const el = document.querySelector(`#selectors select[name="${name}"]`);
     return el ? el.selectedOptions[0]?.textContent.trim() : "";
   };
-  const parts = ["surfvis", pick("field"), `scan${pick("scan")}`, `t${pick("t")}`, `f${pick("f")}`, pick("c")];
+  const parts = ["surfvis", pick("field"), `scan${pick("scan")}`, pick("c")];
   if (selected && document.querySelector("#waterfall .panel")) parts.push(`${selected[0]}-${selected[1]}`);
   return parts.filter(Boolean).join("_").replace(/[^A-Za-z0-9_.+-]+/g, "") + ".png";
 }

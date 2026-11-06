@@ -47,10 +47,26 @@ def serve(
         int,
         typer.Option(help="Port to listen on.", rich_help_panel="Server"),
     ] = 8000,
+    allow_flagging: Annotated[
+        bool,
+        typer.Option(
+            help="Let the browser write FLAG. FLAG is first saved as a CASA flag version, in the background "
+            "from startup; on a large MS this takes minutes, and writes wait for it.",
+            rich_help_panel="Flagging",
+        ),
+    ] = False,
     reload: Annotated[
         bool,
         typer.Option(help="Reload on source changes (development only).", rich_help_panel="Server"),
     ] = False,
+    profile: Annotated[
+        Path | None,
+        typer.Option(
+            help="Directory to write per-request timings (spans.jsonl, also printed) and cProfile dumps of "
+            "requests slower than a second to. Summarise with 'python -m surfvis.web.profiling DIR'.",
+            rich_help_panel="Server",
+        ),
+    ] = None,
 ):
     """
     Browse surfchi2 output and plot baseline waterfalls on demand.
@@ -69,13 +85,17 @@ def serve(
             hint += " -- note xarray-ms needs Python 3.11 or newer"
         raise typer.BadParameter(f"The web interface needs the optional extras: {hint} ({exc})") from exc
 
-    typer.echo(f"surfvis serving {data} on http://{host}:{port}")
+    mode = "flagging ENABLED -- FLAG may be modified" if allow_flagging else "read-only"
+    typer.echo(f"surfvis serving {data} on http://{host}:{port} ({mode})")
     if host not in ("127.0.0.1", "localhost", "::1"):
         typer.echo(
-            f"warning: listening on {host} without authentication; anyone who can reach it can use it.", err=True
+            f"warning: listening on {host} without authentication; anyone who can reach it can use it"
+            + (", and write flags." if allow_flagging else "."),
+            err=True,
         )
     if not reload:
-        uvicorn.run(create_app(data, ms, gtables=gtable), host=host, port=port)
+        app = create_app(data, ms, gtables=gtable, allow_flagging=allow_flagging, profile=profile)
+        uvicorn.run(app, host=host, port=port)
         return
 
     # Reload re-imports the app in a worker process, so uvicorn needs an
@@ -87,6 +107,8 @@ def serve(
     os.environ[web_app.ENV_DATA] = str(data)
     os.environ[web_app.ENV_MS] = str(ms) if ms is not None else ""
     os.environ[web_app.ENV_GTABLES] = os.pathsep.join(gtable or [])
+    os.environ[web_app.ENV_FLAGGING] = "1" if allow_flagging else ""
+    os.environ[web_app.ENV_PROFILE] = str(profile) if profile is not None else ""
     uvicorn.run(
         "surfvis.web.app:app_from_env",
         factory=True,

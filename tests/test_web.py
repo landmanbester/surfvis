@@ -5,6 +5,9 @@ checks that the pipeline carries that outlier through to something a human
 would see.
 """
 
+import functools
+import json
+
 import pytest
 
 from tests.conftest import needs_ms, needs_web
@@ -23,21 +26,19 @@ def test_chi2_writes_a_readable_zarr(chi2_zarr):
     assert store.fields == [0]
     assert store.spws(0) == [0]
 
-    times, freqs, corrs = store.bins(0, 0, 1)
-    assert times == [0, 1]
-    assert freqs == [0, 1]
     # Diagonal correlations of a 4-correlation MS, resolved from [0, -1].
-    assert corrs == ["XX", "YY"]
+    assert store.products(0, 0, 1) == ["XX", "YY"]
+    # One total per scan: the time and frequency chunks only split the work.
+    assert store.group(0, 0, 1).chi2.dims == ("product", "antenna1", "antenna2")
 
 
 @needs_ms
-def test_hot_baseline_dominates_its_chunk(chi2_zarr):
+def test_hot_baseline_dominates_its_scan(chi2_zarr):
     """The planted bad baseline is the worst pair, by a wide margin."""
     from surfvis.web.store import Chi2Store, Selection
 
     store = Chi2Store(chi2_zarr["zarr"])
-    chunk = store.chunk(Selection(0, 0, 1, 0, 0, "XX"))
-    matrix = chunk.chi2_dof
+    matrix = store.matrix(Selection(0, 0, 1, "XX")).chi2_dof
 
     assert matrix.shape == (8, 8)
     assert np.isnan(np.diag(matrix)).all(), "auto-correlations carry no chi-squared"
@@ -49,19 +50,43 @@ def test_hot_baseline_dominates_its_chunk(chi2_zarr):
 
 
 @needs_ms
-def test_chunk_bounds_describe_the_scan(chi2_zarr):
-    """Bin bounds are what let a reader outline the chunk on a waterfall."""
+def test_heatmap_is_the_whole_scan(chi2_zarr):
+    """Each cell is chi-squared/dof over every time and channel of the scan, however chi2 chunked it."""
+    from casacore.tables import table
+
     from surfvis.web.store import Chi2Store, Selection
 
     store = Chi2Store(chi2_zarr["zarr"])
-    first = store.chunk(Selection(0, 0, 1, 0, 0, "XX"))
-    second = store.chunk(Selection(0, 0, 1, 1, 1, "XX"))
+    matrix = store.matrix(Selection(0, 0, 1, "XX"))
+    with table(chi2_zarr["ms"]["path"], ack=False) as t:
+        sel = t.query("SCAN_NUMBER == 1")
+        a1, a2 = sel.getcol("ANTENNA1"), sel.getcol("ANTENNA2")
+        r, w = sel.getcol("RESIDUAL")[..., 0], sel.getcol("WEIGHT_SPECTRUM")[..., 0]
+    for p, q in ((0, 1), (1, 5), (3, 7)):
+        rows = (a1 == p) & (a2 == q)
+        want = (np.abs(r[rows]) ** 2 * w[rows]).sum() / r[rows].size
+        np.testing.assert_allclose(matrix.chi2_dof[p, q], want, rtol=1e-5)
+    assert matrix.rcol == "RESIDUAL"
 
-    assert (first.t0, first.tf) == (0, 6)
-    assert (first.chan0, first.chanf) == (0, 16)
-    assert second.t0 == 6
-    assert second.chan0 == 16
-    assert first.rcol == "RESIDUAL"
+
+@needs_web
+def test_older_stores_with_bins_are_summed(tmp_path):
+    """Stores written before per-scan totals kept every chunk; the reader sums them."""
+    import xarray as xr
+
+    from surfvis.web.store import Chi2Store, Selection
+
+    rng = np.random.default_rng(0)
+    shape = (3, 2, 1, 4, 4)
+    chi2, counts = rng.uniform(1, 2, shape), rng.integers(1, 5, shape).astype(float)
+    dims = ("time_bin", "freq_bin", "product", "antenna1", "antenna2")
+    xr.Dataset(
+        {"chi2": (dims, chi2), "counts": (dims, counts)},
+        coords={"product": ["XX"], "time_bin": np.arange(3), "freq_bin": np.arange(2)},
+        attrs={"ms": "x.ms", "rcol": "RESIDUAL", "antenna_names": ["a", "b", "c", "d"]},
+    ).to_zarr(tmp_path / "old.zarr", group="field0/spw0/scan1")
+    got = Chi2Store(tmp_path / "old.zarr").matrix(Selection(0, 0, 1, "XX")).chi2_dof
+    np.testing.assert_allclose(got, chi2.sum(axis=(0, 1))[0] / counts.sum(axis=(0, 1))[0])
 
 
 @needs_web
@@ -203,7 +228,7 @@ def test_log_scale_separates_the_outlier(chi2_zarr):
     from surfvis.web.store import Chi2Store, Selection
 
     store = Chi2Store(chi2_zarr["zarr"])
-    matrix = store.chunk(Selection(0, 0, 1, 0, 0, "XX")).chi2_dof
+    matrix = store.matrix(Selection(0, 0, 1, "XX")).chi2_dof
 
     norm, vmin, vmax = render.make_norm(matrix, "log")
     colours = render.cell_colours(matrix, norm)
@@ -235,9 +260,11 @@ def test_routes(chi2_zarr):
     assert "/static/style.css?v=" in index.text
     # Save as PNG renders the page in the browser with the vendored html-to-image.
     assert 'id="save-png"' in index.text
+    # Static files revalidate: ES module imports cannot carry the ?v= version.
+    assert client.get("/static/wf/widget.mjs").headers["cache-control"] == "no-cache"
     assert client.get("/static/html-to-image.js").status_code == 200
 
-    heatmap = client.get("/heatmap?field=0&spw=0&scan=1&t=0&f=0&c=XX")
+    heatmap = client.get("/heatmap?field=0&spw=0&scan=1&c=XX")
     assert heatmap.status_code == 200
     # One clickable cell per ordered antenna pair; the diagonal is not a baseline.
     assert heatmap.text.count('hx-get="/waterfall') == 64 - 8
@@ -255,21 +282,20 @@ def test_routes(chi2_zarr):
     assert len(grid["names"]) == 8 and len(grid["values"]) == 8 and len(grid["positions"]) == 8
     assert grid["values"][1][5] == max(v for row in grid["values"] for v in row if v is not None)
 
-    png = client.get("/histogram.png?field=0&spw=0&scan=1&t=0&f=0&c=XX")
+    png = client.get("/histogram.png?field=0&spw=0&scan=1&c=XX")
     assert png.headers["content-type"] == "image/png"
     assert png.content[:8] == b"\x89PNG\r\n\x1a\n"
 
-    wf = client.get("/waterfall.png?field=0&spw=0&scan=1&t=0&f=0&c=XX&p=1&q=5&column=RESIDUAL&quantity=amp")
+    wf = client.get("/waterfall.png?field=0&spw=0&scan=1&c=XX&p=1&q=5&column=RESIDUAL&quantity=amp")
     assert wf.headers["content-type"] == "image/png"
 
-    assert client.get("/heatmap?field=0&spw=0&scan=99&t=0&f=0&c=XX").status_code == 404
-    assert client.get("/heatmap?field=0&spw=0&scan=1&t=0&f=0&c=XX&scale=nope").status_code == 400
+    assert client.get("/heatmap?field=0&spw=0&scan=99&c=XX").status_code == 404
+    assert client.get("/heatmap?field=0&spw=0&scan=1&c=XX&scale=nope").status_code == 400
 
     # Bad indices are client errors, never a 500 and never a silent wrap to the end.
-    assert client.get("/heatmap?field=0&spw=0&scan=1&t=99&f=0&c=XX").status_code == 404
-    assert client.get("/heatmap?field=0&spw=0&scan=1&t=-1&f=0&c=XX").status_code == 422
-    assert client.get("/histogram.png?field=0&spw=0&scan=1&t=0&f=0&c=XX&scale=nope").status_code == 400
-    waterfall = "/waterfall?field=0&spw=0&scan=1&t=0&f=0&c=XX"
+    assert client.get("/heatmap?field=0&spw=0&scan=1&c=ZZ").status_code == 404
+    assert client.get("/histogram.png?field=0&spw=0&scan=1&c=XX&scale=nope").status_code == 400
+    waterfall = "/waterfall?field=0&spw=0&scan=1&c=XX"
     assert client.get(waterfall + "&p=99&q=1").status_code == 404
     assert client.get(waterfall + "&p=-1&q=1").status_code == 422
     assert client.get(waterfall.replace("/waterfall?", "/waterfall.png?") + "&p=1&q=99").status_code == 404
@@ -282,26 +308,23 @@ def test_routes(chi2_zarr):
 
 
 @needs_web
-def test_changing_scan_refreshes_the_bins(chi2_zarr):
-    """Each scan has its own time and frequency bins, so the scan select re-renders the selectors."""
+def test_changing_scan_keeps_product_and_scale(chi2_zarr):
+    """The heatmap is a whole scan; the scan select re-renders the selectors, keeping product and scale."""
     pytest.importorskip("httpx2")
     from fastapi.testclient import TestClient
 
     from surfvis.web.app import create_app
 
     client = TestClient(create_app(chi2_zarr["zarr"]))
-    assert '<select name="scan"\n            hx-get="/scans"' in client.get("/").text
+    index = client.get("/").text
+    assert '<select name="scan"\n            hx-get="/scans"' in index
+    assert 'name="t"' not in index and 'name="f"' not in index
 
-    page = client.get("/scans?field=0&spw=0&scan=2&t=1&f=1&c=YY&scale=robust").text
+    page = client.get("/scans?field=0&spw=0&scan=2&c=YY&scale=robust").text
     assert '<option value="2" selected>2</option>' in page
-    for name, value in (("t", 1), ("f", 1)):
-        menu = page.split(f'name="{name}"')[1].split("</select>")[0]
-        assert f'<option value="{value}" selected>' in menu
     assert '<option value="YY" selected>' in page and '<option value="robust" selected>' in page
-
-    # A bin the scan does not have falls back to the first, rather than 404ing the heatmap.
-    menu = client.get("/scans?field=0&spw=0&scan=2&t=99").text.split('name="t"')[1].split("</select>")[0]
-    assert '<option value="0" selected>' in menu
+    # A product the scan does not have falls back to the first.
+    assert '<option value="XX" selected>' in client.get("/scans?field=0&spw=0&scan=2&c=V").text
     assert client.get("/scans?field=7&spw=0").status_code == 404
 
 
@@ -316,15 +339,16 @@ def test_only_offered_gain_tables_are_opened(chi2_zarr, gain_table, tmp_path):
 
     from surfvis.web.app import create_app
 
-    query = "field=0&spw=0&scan=1&t=0&f=0&c=XX&p=1&q=5&column=RESIDUAL"
+    query = "field=0&spw=0&scan=1&c=XX&p=1&q=5&column=RESIDUAL"
 
     # chi2_zarr was made without gains, and gain_table is not next to its MS.
     client = TestClient(create_app(chi2_zarr["zarr"]))
     for path in (gain_table, "/etc", "/nowhere/NET"):
         panel = client.get(f"/waterfall?{query}&gtable={path}").text
-        assert "not one this server offers" in panel and "waterfall.png?" not in panel
+        assert "not one this server offers" in panel and "waterfall.bin?" not in panel
         assert "holds no" not in panel and "No gain term" not in panel
     assert client.get(f"/waterfall.png?{query}&gtable={gain_table}").status_code == 403
+    assert client.get(f"/waterfall.bin?{query}&gtable={gain_table}").status_code == 403
 
     # Passed to serve --gtable: offered, and applied.
     given = TestClient(create_app(chi2_zarr["zarr"], gtables=[gain_table]))
@@ -353,17 +377,15 @@ def test_reload_builds_the_app_from_the_environment(chi2_zarr, monkeypatch):
 
 
 @needs_web
-def test_a_chunk_reads_only_its_own_matrix(chi2_zarr):
-    """Reading one bin must not pull, or cache, the whole scan's cube."""
+def test_a_matrix_does_not_cache_the_group(chi2_zarr):
+    """Reading one product must not pull, or keep, every product (or an older store's every bin)."""
     from surfvis.web.store import Chi2Store, Selection
 
     store = Chi2Store(chi2_zarr["zarr"])
-    store.chunk(Selection(0, 0, 1, 0, 0, "XX"))
+    store.matrix(Selection(0, 0, 1, "XX"))
     ds = store.group(0, 0, 1)
     assert type(ds.chi2.variable._data).__name__ != "MemoryCachedArray"
     assert not isinstance(ds.chi2.variable._data, np.ndarray)
-    with pytest.raises(IndexError):
-        store.chunk(Selection(0, 0, 1, -1, 0, "XX"))
 
 
 @needs_web
@@ -417,8 +439,8 @@ def test_each_correlation_gets_its_own_chi2(chi2_zarr):
     from surfvis.web.store import Chi2Store, Selection
 
     store = Chi2Store(chi2_zarr["zarr"])
-    xx = store.chunk(Selection(0, 0, 1, 0, 0, "XX")).chi2_dof
-    yy = store.chunk(Selection(0, 0, 1, 0, 0, "YY")).chi2_dof
+    xx = store.matrix(Selection(0, 0, 1, "XX")).chi2_dof
+    yy = store.matrix(Selection(0, 0, 1, "YY")).chi2_dof
     assert not np.allclose(xx, yy, equal_nan=True)
 
 
@@ -430,10 +452,9 @@ def test_residual_formed_on_the_fly_matches_the_residual_column(chi2_zarr, chi2_
     plain = Chi2Store(chi2_zarr["zarr"])
     formed = Chi2Store(chi2_corrected["zarr"])
     for product in ("XX", "YY"):
-        for t, f in ((0, 0), (1, 1)):
-            want = plain.chunk(Selection(0, 0, 2, t, f, product)).chi2_dof
-            got = formed.chunk(Selection(0, 0, 2, t, f, product)).chi2_dof
-            np.testing.assert_allclose(got, want, rtol=1e-3, equal_nan=True)
+        want = plain.matrix(Selection(0, 0, 2, product)).chi2_dof
+        got = formed.matrix(Selection(0, 0, 2, product)).chi2_dof
+        np.testing.assert_allclose(got, want, rtol=1e-3, equal_nan=True)
 
     attrs = formed.group(0, 0, 1).attrs
     assert (attrs["rcol"], attrs["mcol"], attrs["gtable"]) == ("DATA", "MODEL_DATA", chi2_corrected["gtable"])
@@ -445,11 +466,11 @@ def test_stokes_chi2_is_normalised_and_finds_the_bad_baseline(chi2_corrected):
     from surfvis.web.store import Chi2Store, Selection
 
     store = Chi2Store(chi2_corrected["zarr"])
-    assert store.bins(0, 0, 1)[2] == ["XX", "YY", "I", "V"]
+    assert store.products(0, 0, 1) == ["XX", "YY", "I", "V"]
 
-    xx = store.chunk(Selection(0, 0, 1, 0, 0, "XX")).chi2_dof
+    xx = store.matrix(Selection(0, 0, 1, "XX")).chi2_dof
     for product in ("I", "V"):
-        matrix = store.chunk(Selection(0, 0, 1, 0, 0, product)).chi2_dof
+        matrix = store.matrix(Selection(0, 0, 1, product)).chi2_dof
         p, q = np.unravel_index(np.nanargmax(matrix), matrix.shape)
         assert {int(p), int(q)} == set(chi2_corrected["ms"]["hot"])
         # Complex unit-variance noise gives chi2/dof ~ 2 for XX and for Stokes alike.
@@ -530,6 +551,44 @@ def test_waterfall_forms_the_corrected_residual(chi2_zarr, gain_table, quantity)
 
 
 @needs_web
+def test_gains_follow_the_stored_order_not_xarray_ms_labels(chi2_zarr, gain_table, tmp_path):
+    """xarray-ms labels a baseline stored as (6, 2) as (2, 6) without conjugating it.
+
+    The data are V_62, so the correction is inv(g_6) V inv(g_2)^H, whichever
+    order the cell asked for and whatever xarray-ms calls it.
+    """
+    import shutil
+
+    from casacore.tables import table
+
+    from surfvis.web import msdata
+
+    info = chi2_zarr["ms"]
+    names = info["antenna_names"]
+    ms = str(tmp_path / "reversed.ms")
+    shutil.copytree(info["path"], ms)
+    with table(ms, readonly=False, ack=False) as t:
+        a1, a2 = t.getcol("ANTENNA1"), t.getcol("ANTENNA2")
+        bl = np.flatnonzero((a1 == 2) & (a2 == 6))
+        a1[bl], a2[bl] = 6, 2
+        t.putcol("ANTENNA1", a1)
+        t.putcol("ANTENNA2", a2)
+        scan = t.getcol("SCAN_NUMBER")[bl]
+        data = t.getcol("DATA")[bl][scan == 2][..., 0]
+        model = t.getcol("MODEL_DATA")[bl][scan == 2][..., 0]
+
+    g = info["gains"][info["ntime"] :]
+    want = data / (g[:, :, 6, 0] * np.conj(g[:, :, 2, 0])) - model
+    for request in ((names[2], names[6]), (names[6], names[2])):
+        parts = [
+            msdata.waterfall(ms, 0, 0, 2, *request, "XX", "DATA", q, model="MODEL_DATA", gtable=gain_table)
+            for q in ("real", "imag")
+        ]
+        np.testing.assert_allclose(parts[0].values + 1j * parts[1].values, want, atol=1e-4)
+        assert (parts[0].antenna1, parts[0].antenna2) == (names[6], names[2])
+
+
+@needs_web
 def test_stokes_waterfall_combines_correlations(chi2_zarr):
     from surfvis.web import msdata
 
@@ -604,7 +663,7 @@ def test_waterfall_controls(chi2_corrected):
     from surfvis.web.app import create_app
 
     client = TestClient(create_app(chi2_corrected["zarr"]))
-    base = "/waterfall?field=0&spw=0&scan=1&t=0&f=0&c=I&p=1&q=5"
+    base = "/waterfall?field=0&spw=0&scan=1&c=I&p=1&q=5"
 
     panel = client.get(base)
     assert panel.status_code == 200
@@ -620,7 +679,7 @@ def test_waterfall_controls(chi2_corrected):
     assert "no longer shows" not in panel.text
     # The column is corrected and has a model subtracted, so WEIGHT is not offered.
     assert '<option value="WEIGHT"' not in panel.text
-    assert "waterfall.png?" in panel.text
+    assert 'data-src="/waterfall.bin?' in panel.text and "<canvas" in panel.text
     assert 'class="keep"' not in panel.text
 
     png = client.get(base.replace("/waterfall?", "/waterfall.png?"))
@@ -635,4 +694,287 @@ def test_waterfall_controls(chi2_corrected):
 
     broken = client.get(base + "&gtable=/nowhere/NET")
     assert "gain table" in broken.text
-    assert "waterfall.png?" not in broken.text
+    assert "waterfall.bin?" not in broken.text
+
+
+@needs_web
+def test_plane_cache_reuses_and_invalidates(chi2_zarr, monkeypatch):
+    """Zooming re-slices a cached plane; new settings or an invalidate re-read the MS."""
+    from surfvis.web import msdata
+
+    ms = chi2_zarr["ms"]["path"]
+    names = chi2_zarr["ms"]["antenna_names"]
+    msdata.invalidate(ms)
+    calls = []
+    real = msdata.waterfall
+    monkeypatch.setattr(msdata, "waterfall", lambda *a, **k: calls.append(1) or real(*a, **k))
+
+    a = msdata.cached_plane(ms, 0, 0, 1, names[0], names[2], "XX", "RESIDUAL")
+    b = msdata.cached_plane(ms, 0, 0, 1, names[0], names[2], "XX", "RESIDUAL")
+    assert a is b and len(calls) == 1
+    assert np.iscomplexobj(a.plane) and a.plane.shape == a.flags.shape == (12, 32)
+    assert a.freqs.shape == (32,) and a.times.shape == (12,)
+
+    msdata.cached_plane(ms, 0, 0, 1, names[0], names[2], "YY", "RESIDUAL")
+    assert len(calls) == 2
+    msdata.invalidate(ms)
+    msdata.cached_plane(ms, 0, 0, 1, names[0], names[2], "XX", "RESIDUAL")
+    assert len(calls) == 3
+
+
+@needs_web
+def test_waterfall_bin(chi2_zarr):
+    """Overview, window, clamping, caps and errors of the canvas data route."""
+    pytest.importorskip("httpx2")
+    from fastapi.testclient import TestClient
+
+    from surfvis.web import msdata
+    from surfvis.web.app import create_app
+    from surfvis.web.planes import decode
+
+    client = TestClient(create_app(chi2_zarr["zarr"]))
+    names = chi2_zarr["ms"]["antenna_names"]
+    base = "/waterfall.bin?field=0&spw=0&scan=1&c=XX&p=1&q=5&column=RESIDUAL"
+
+    r = client.get(base + "&meta=true")
+    assert r.status_code == 200 and r.headers["content-type"] == "application/octet-stream"
+    assert r.headers["cache-control"] == "no-store"
+    head, values, flags = decode(r.content)
+    assert (head["nt"], head["nc"], head["tstep"], head["cstep"]) == (12, 32, 1, 1)
+    assert (head["ntime"], head["nchan"]) == (12, 32) and "rect" not in head
+    assert len(head["times"]) == 12 and len(head["freqs"]) == 32
+    assert head["colormap"] == "viridis" and head["vmin"] < head["vmax"]
+    assert head["title"].startswith(f"{names[1]}-{names[5]}")
+    wf = msdata.waterfall(chi2_zarr["ms"]["path"], 0, 0, 1, names[1], names[5], "XX", "RESIDUAL")
+    ok = ~wf.flags
+    np.testing.assert_allclose(values[ok], wf.values[ok], rtol=1e-5)
+
+    small, _, _ = decode(client.get(base + "&max_t=4&max_c=5").content)
+    assert (small["tstep"], small["cstep"], small["nt"], small["nc"]) == (3, 7, 4, 5)
+    assert "times" not in small
+    assert (small["vmin"], small["vmax"]) == (head["vmin"], head["vmax"])  # colours do not move on zoom
+
+    win, wvalues, _ = decode(client.get(base + "&t0=2&t1=5&c0=10&c1=20").content)
+    assert (win["nt"], win["nc"], win["t0"], win["c1"]) == (3, 10, 2, 20)
+    np.testing.assert_array_equal(wvalues, values[2:5, 10:20])
+
+    clamped, _, _ = decode(client.get(base + "&t0=-5&t1=999&max_t=100000").content)
+    assert (clamped["t0"], clamped["t1"], clamped["nt"]) == (0, 12, 12)
+
+    phase, _, _ = decode(client.get(base + "&quantity=phase").content)
+    assert phase["colormap"] == "twilight" and phase["quantity"] == "phase"
+
+    assert client.get(base + "&t0=5&t1=5").status_code == 400
+    assert client.get(base + "&c0=40").status_code == 400
+    assert client.get(base + "&quantity=nope").status_code == 400
+    assert client.get(base.replace("RESIDUAL", "NOPE")).status_code == 404
+    assert client.get(base.replace("p=1", "p=99")).status_code == 404
+    assert client.get(base.replace("p=1", "p=-1")).status_code == 422
+    # A lower-triangle cell draws the baseline the way the MS stores it.
+    reverse, rvalues, _ = decode(client.get(base.replace("p=1&q=5", "p=5&q=1")).content)
+    assert reverse["title"].startswith(f"{names[1]}-{names[5]}")
+    np.testing.assert_array_equal(rvalues, values)
+
+
+@needs_web
+def test_waterfall_bin_reads_the_ms_once_across_heatmaps(chi2_zarr, monkeypatch):
+    """The same baseline and settings from another heatmap product reuse the cached plane."""
+    pytest.importorskip("httpx2")
+    from fastapi.testclient import TestClient
+
+    from surfvis.web import msdata
+    from surfvis.web.app import create_app
+    from surfvis.web.planes import decode
+
+    msdata.invalidate(chi2_zarr["ms"]["path"])
+    calls = []
+    real = msdata.waterfall
+    monkeypatch.setattr(msdata, "waterfall", lambda *a, **k: calls.append(1) or real(*a, **k))
+    client = TestClient(create_app(chi2_zarr["zarr"]))
+    base = "/waterfall.bin?field=0&spw=0&scan=1&p=1&q=5&product=XX&column=RESIDUAL"
+
+    first, _, _ = decode(client.get(base + "&c=XX").content)
+    second, _, _ = decode(client.get(base + "&c=YY&quantity=phase").content)
+    assert (first["quantity"], second["quantity"]) == ("amp", "phase")
+    assert len(calls) == 1
+    cached = msdata.cached_plane(
+        chi2_zarr["ms"]["path"], 0, 0, 1, *chi2_zarr["ms"]["antenna_names"][1:6:4], "XX", "RESIDUAL"
+    )
+    assert cached.plane.dtype == np.complex64 and cached.values is None
+
+
+@needs_web
+def test_profile_reports_where_a_request_spent_its_time(chi2_zarr, tmp_path, monkeypatch):
+    """serve --profile: spans from deep in msdata reach the request's Server-Timing, the log and a cProfile dump."""
+    pytest.importorskip("httpx2")
+    import pstats
+
+    from fastapi.testclient import TestClient
+
+    from surfvis.web import msdata, profiling
+    from surfvis.web.app import create_app
+
+    msdata.invalidate(chi2_zarr["ms"]["path"])
+    monkeypatch.setattr(profiling, "SLOW", 0.0)
+    out = tmp_path / "profile"
+    try:
+        client = TestClient(create_app(chi2_zarr["zarr"], profile=out))
+        r = client.get("/waterfall.bin?field=0&spw=0&scan=1&c=XX&p=1&q=5&column=RESIDUAL")
+    finally:
+        profiling.enable(None)
+    assert r.status_code == 200
+    timing = r.headers["server-timing"]
+    for name in ("cached_plane__miss", "open_partition", "read_RESIDUAL", "encode", "total;dur="):
+        assert name in timing, timing
+
+    (record,) = [json.loads(line) for line in (out / "spans.jsonl").read_text().splitlines()]
+    names = [s["name"] for s in record["spans"]]
+    assert record["path"] == "/waterfall.bin" and record["status"] == 200
+    assert "waterfall" in names and "read flags" in names
+    # Nested: the MS read happens inside the cache miss.
+    depth = {s["name"]: s["depth"] for s in record["spans"]}
+    assert depth["read RESIDUAL"] > depth["cached_plane: miss"]
+    assert "read RESIDUAL" in profiling.summarise(out)
+
+    (dump,) = out.glob("*-waterfall_bin.prof")
+    assert pstats.Stats(str(dump)).total_tt > 0
+
+    # Off again: no header, nothing written.
+    quiet = TestClient(create_app(chi2_zarr["zarr"]))
+    assert "server-timing" not in quiet.get("/healthz").headers
+
+
+@needs_web
+def test_a_waterfall_opens_one_partition_not_the_whole_ms(chi2_zarr, monkeypatch):
+    """open_datatree opens every partition; on a large MS that took over ten minutes before the first waterfall."""
+    pytest.importorskip("httpx2")
+    import xarray
+    from fastapi.testclient import TestClient
+
+    from surfvis.web import msdata
+    from surfvis.web.app import create_app
+
+    msdata.invalidate(chi2_zarr["ms"]["path"])
+    trees = []
+    real = xarray.open_datatree
+    monkeypatch.setattr(xarray, "open_datatree", lambda *a, **k: trees.append(a) or real(*a, **k))
+    client = TestClient(create_app(chi2_zarr["zarr"]))
+    query = "field=0&spw=0&scan=1&c=XX&p=1&q=5"
+    panel = client.get(f"/waterfall?{query}")
+    assert panel.status_code == 200 and "Cannot open" not in panel.text
+    assert client.get(f"/waterfall.bin?{query}").status_code == 200
+    assert trees == []
+
+
+@needs_web
+def test_cell_colours_match_matplotlib_cell_by_cell():
+    """The vectorised colours are exactly what to_hex(cmap(norm(v))) gives, per cell."""
+    from matplotlib import colormaps
+    from matplotlib.colors import LogNorm, to_hex
+
+    from surfvis.web import render
+
+    rng = np.random.default_rng(1)
+    matrix = 10 ** rng.uniform(-2, 3, (40, 40))
+    matrix[rng.random(matrix.shape) < 0.1] = np.nan
+    matrix[0, :5] = [0.0, -1.0, np.inf, 1e-9, 1e9]
+    for scale in render.SCALES:
+        norm, _, _ = render.make_norm(matrix, scale)
+        expected = [
+            [
+                render.NAN_COLOUR
+                if not np.isfinite(v) or (isinstance(norm, LogNorm) and v <= 0)
+                else to_hex(colormaps[render.CMAP](norm(v)))
+                for v in row
+            ]
+            for row in matrix
+        ]
+        assert render.cell_colours(matrix, norm) == expected, scale
+
+
+@needs_web
+def test_scan_rows_are_read_once_per_scan(chi2_zarr, monkeypatch):
+    """Every baseline of a scan, in either order, comes from one query; a FLAG write keeps it."""
+    from surfvis.web import msdata
+
+    ms = chi2_zarr["ms"]["path"]
+    names = chi2_zarr["ms"]["antenna_names"]
+    msdata._query_scan_rows.cache_clear()
+    queries = []
+    real = msdata._query_scan_rows.__wrapped__
+    monkeypatch.setattr(
+        msdata, "_query_scan_rows", functools.lru_cache(maxsize=8)(lambda *a: queries.append(a) or real(*a))
+    )
+
+    for p, q in ((1, 5), (5, 1), (0, 2), (2, 3)):
+        rows, times = msdata.baseline_rows(ms, 0, 0, 1, names[p], names[q])
+        if p < q:  # the fixture stores the lower antenna first
+            assert rows.size == chi2_zarr["ms"]["ntime"] and rows.flags.writeable
+            assert np.all(np.diff(times) > 0)
+        else:
+            assert rows.size == 0
+    assert msdata.stored_order(ms, 0, 0, 1, names[5], names[1]) == (names[1], names[5])
+    msdata.invalidate(ms)  # what the flagger does after a write
+    msdata.baseline_rows(ms, 0, 0, 1, names[1], names[5])
+    assert len(queries) == 1
+    msdata.baseline_rows(ms, 0, 0, 2, names[1], names[5])
+    assert len(queries) == 2
+
+
+@needs_web
+def test_a_heatmap_warms_its_scan_for_the_first_waterfall(chi2_zarr, monkeypatch):
+    """While the heatmap is on screen the scan is opened and its rows read, once, in the background."""
+    pytest.importorskip("httpx2")
+    from fastapi.testclient import TestClient
+
+    from surfvis.web import msdata
+    from surfvis.web.app import create_app
+
+    ms = chi2_zarr["ms"]["path"]
+    msdata.invalidate(ms)
+    msdata._query_scan_rows.cache_clear()
+    futures = []
+    real_warm = msdata.warm
+    monkeypatch.setattr(msdata, "warm", lambda *a: futures.append(real_warm(*a)) or futures[-1])
+    client = TestClient(create_app(chi2_zarr["zarr"]))
+    assert client.get("/heatmap?field=0&spw=0&scan=1&c=XX").status_code == 200
+    assert futures[0].result(timeout=60) is True
+
+    opened = msdata._open_partition.cache_info().misses
+    queried = msdata._query_scan_rows.cache_info().misses
+    assert client.get("/waterfall.bin?field=0&spw=0&scan=1&c=XX&p=1&q=5").status_code == 200
+    assert msdata._open_partition.cache_info().misses == opened
+    assert msdata._query_scan_rows.cache_info().misses == queried
+
+    # Only the latest request is warmed: a queued one that was overtaken is skipped.
+    assert msdata._warm((ms, 0, 0, 2)) is False
+    quiet = TestClient(create_app(chi2_zarr["zarr"], warm=False))
+    quiet.get("/heatmap?field=0&spw=0&scan=2&c=XX")
+    assert len(futures) == 1
+
+
+@needs_web
+def test_a_request_waits_for_the_warm_up_instead_of_repeating_it(chi2_zarr, monkeypatch):
+    """Two threads missing on one scan read it once; the second waits, and says so in the profile."""
+    import threading
+    import time
+
+    from surfvis.web import msdata
+
+    ms = chi2_zarr["ms"]["path"]
+    names = chi2_zarr["ms"]["antenna_names"]
+    queries = []
+    real = msdata._query_scan_rows.__wrapped__
+
+    def slow(*a):
+        queries.append(a)
+        time.sleep(0.5)
+        return real(*a)
+
+    monkeypatch.setattr(msdata, "_query_scan_rows", functools.lru_cache(maxsize=8)(slow))
+    first = threading.Thread(target=msdata.scan_rows, args=(ms, 0, 0, 1))
+    first.start()
+    time.sleep(0.1)
+    rows, _ = msdata.baseline_rows(ms, 0, 0, 1, names[1], names[5])
+    first.join()
+    assert len(queries) == 1 and rows.size == chi2_zarr["ms"]["ntime"]
