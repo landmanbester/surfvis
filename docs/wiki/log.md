@@ -3,10 +3,16 @@ type: log
 title: Wiki changelog
 description: Chronological record of what changed in the wiki and why.
 timestamp: 2026-11-06
-last_verified_commit: 29b63fb
+last_verified_commit: 5c7561c
 ---
 
 # Wiki changelog
+
+## 2026-11-06 — warm-up, per-scan rows, vectorised heatmap colours (verified at `5c7561c`)
+
+- **web-app.md:** the second profiling round on a 10.9 M-row MS: heatmap
+  colours, `scan_rows()`, the background warm-up and `_Coalescer`; and the
+  open problem that `invalidate()` after a flag write reopens the scan.
 
 ## 2026-11-06 — the first waterfall no longer opens the datatree (verified at `29b63fb`)
 
