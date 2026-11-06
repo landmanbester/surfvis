@@ -3,10 +3,16 @@ type: log
 title: Wiki changelog
 description: Chronological record of what changed in the wiki and why.
 timestamp: 2026-11-06
-last_verified_commit: 8741113
+last_verified_commit: 29b63fb
 ---
 
 # Wiki changelog
+
+## 2026-11-06 — the first waterfall no longer opens the datatree (verified at `29b63fb`)
+
+- **web-app.md:** `data_group()` returns the MSv2 backend's constant `base`
+  group instead of opening every partition; the profiler's stuck-request
+  watchdog, `SIGUSR1` stack dumps and `render template` span.
 
 ## 2026-11-06 — request profiling (verified at `8741113`)
 

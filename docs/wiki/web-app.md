@@ -4,7 +4,7 @@ title: Chi-squared browser
 description: How surfvis serve links surfchi2 output to on-demand baseline waterfalls, the waterfall's correction / Stokes / flag-version controls, and the xarray-ms facts it depends on.
 tags: [web, fastapi, htmx, xarray-ms, zarr]
 timestamp: 2026-11-06
-last_verified_commit: 8741113
+last_verified_commit: 29b63fb
 ---
 
 # Chi-squared browser
@@ -88,9 +88,16 @@ Verified against the `0.4.0a*` line pinned in `pyproject.toml` (see
   maps (`DATA`, `WEIGHT_SPECTRUM`, `FLAG`), so both spellings work in the UI.
   It must translate **nothing else**: it once mapped `CORRECTED_DATA` to
   `VISIBILITY` too, so choosing `CORRECTED_DATA` plotted `DATA`.
-- **`data_groups` is attached by `open_datatree`, not `open_dataset`.** Hence
-  `msdata.data_group()` opens the tree once and caches it, while the per-chunk
-  reads use `open_dataset(partition_key=...)`.
+- **`data_groups` is attached by `open_datatree`, not `open_dataset`,** and
+  `msdata.data_group()` used to open the tree to read it. That opens every
+  partition, and for each xarray-ms reads the row shapes of every secondary
+  column and `np.unique`s them (`CorrelatedFactory.secondary_variables`): on a
+  real MS the first waterfall sat there for over ten minutes. The MSv2 backend
+  hard-codes the only group (`postprocess_datasets`: `base` is `VISIBILITY` /
+  `WEIGHT` / `FLAG`), so `data_group()` now returns that constant and opens
+  nothing. A test pins that a waterfall never calls `open_datatree`. Per-scan
+  reads use `open_dataset(partition_key=...)`, which pays that row-shape scan
+  for one partition only.
 - Columns that are *not* part of the MSv2 standard are surfaced automatically as
   secondary variables under their own names — which is exactly why `RESIDUAL` is
   plottable. Standard columns other than `DATA`/`WEIGHT_SPECTRUM` are dropped,
@@ -334,10 +341,16 @@ not appear at all. The expensive ones to watch: `data_group: open_datatree`
 (opens every partition of the MS), `open_partition`, `baseline_rows` (two
 TaQL queries per waterfall via `stored_order`), and the column reads.
 
-First finding (16 antennas, 3 scans, 1.6 GB synthetic MS): the first
-`/waterfall` opens the datatree **twice**. `_resolve()` calls `data_group`,
-then the first `_open()` sees no stored fingerprint for the MS, clears
-`data_group`'s cache with the others, and `check()` opens it again.
+Requests are only printed when they finish, so a watchdog thread reports any
+request running longer than `STUCK` (10 s), every 10 s, with the spans it is
+inside; `kill -USR1 <pid>` dumps every thread's stack via `faulthandler`.
+`templates.TemplateResponse` is wrapped as a `render template` span. cProfile
+roughly doubles pure-Python time (Jinja especially), so read totals from a
+`--profile` run as upper bounds.
+
+First finding, on com08: the first `/waterfall` hung for over ten minutes in
+`data_group` → `open_datatree` (see "xarray-ms facts" above), and opened it
+twice. Fixed by not opening the datatree at all.
 
 ## Colour scaling
 
