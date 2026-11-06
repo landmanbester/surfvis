@@ -59,6 +59,14 @@ def serve(
         bool,
         typer.Option(help="Reload on source changes (development only).", rich_help_panel="Server"),
     ] = False,
+    profile: Annotated[
+        Path | None,
+        typer.Option(
+            help="Directory to write per-request timings (spans.jsonl, also printed) and cProfile dumps of "
+            "requests slower than a second to. Summarise with 'python -m surfvis.web.profiling DIR'.",
+            rich_help_panel="Server",
+        ),
+    ] = None,
 ):
     """
     Browse surfchi2 output and plot baseline waterfalls on demand.
@@ -86,7 +94,8 @@ def serve(
             err=True,
         )
     if not reload:
-        uvicorn.run(create_app(data, ms, gtables=gtable, allow_flagging=allow_flagging), host=host, port=port)
+        app = create_app(data, ms, gtables=gtable, allow_flagging=allow_flagging, profile=profile)
+        uvicorn.run(app, host=host, port=port)
         return
 
     # Reload re-imports the app in a worker process, so uvicorn needs an
@@ -99,6 +108,7 @@ def serve(
     os.environ[web_app.ENV_MS] = str(ms) if ms is not None else ""
     os.environ[web_app.ENV_GTABLES] = os.pathsep.join(gtable or [])
     os.environ[web_app.ENV_FLAGGING] = "1" if allow_flagging else ""
+    os.environ[web_app.ENV_PROFILE] = str(profile) if profile is not None else ""
     uvicorn.run(
         "surfvis.web.app:app_from_env",
         factory=True,

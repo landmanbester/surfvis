@@ -49,7 +49,7 @@ docker run --rm --user "$(id -u):$(id -g)" -e HOME=/tmp -v "$PWD":/src -w /src \
    PYTHONPATH=/tmp/t:/src/src:/src /tmp/t/bin/pytest tests/ -q -W ignore"
 ```
 
-That is the only way to run the full suite (99 tests; the node one skips in the container). **CI does not run them** —
+That is the only way to run the full suite (100 tests; the node one skips in the container). **CI does not run them** —
 `.github/workflows/ci.yml` installs the lightweight package only, deliberately,
 since python-casacore and numba make CI slow and brittle. Verify locally.
 
@@ -79,7 +79,7 @@ Three layers, and the boundary between them is load-bearing:
 - **`utils/`** is heavy too (`chisq.py` numba kernels, `plotting.py` matplotlib)
   and is imported only from `core/`.
 - **`web/`** is the browser: `store.py` (zarr), `msdata.py` (MS via xarray-ms
-  and arcae), `render.py` (colours + PNGs), `planes.py` (waterfall reduction), `app.py` (FastAPI), `templates/`
+  and arcae), `render.py` (colours + PNGs), `planes.py` (waterfall reduction), `profiling.py` (`serve --profile`), `app.py` (FastAPI), `templates/`
   (htmx partials) and `static/app.js` (selection, hover readout, arrow keys,
   carried settings, loading states, Save as PNG), and `static/wf/` (the canvas waterfall as ES modules, node-tested via `tests/test_js.py`; node is not in the container). `htmx.min.js` and
   `html-to-image.js` are vendored, not loaded from a CDN: compute nodes are

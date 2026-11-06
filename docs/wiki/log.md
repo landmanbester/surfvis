@@ -2,11 +2,18 @@
 type: log
 title: Wiki changelog
 description: Chronological record of what changed in the wiki and why.
-timestamp: 2026-11-05
-last_verified_commit: 00cccac
+timestamp: 2026-11-06
+last_verified_commit: HEADSHA
 ---
 
 # Wiki changelog
+
+## 2026-11-06 — request profiling (verified at `HEADSHA`)
+
+- **web-app.md:** new "Profiling" section for `serve --profile DIR`: spans via a
+  `ContextVar`, `Server-Timing`, `spans.jsonl`, cProfile dumps of slow
+  requests, and the first finding (the datatree opened twice on the first
+  waterfall).
 
 ## 2026-11-05 — flagging review fixes; whole-scan heatmaps (verified at `00cccac`)
 

@@ -24,6 +24,7 @@ import xarray
 from surfvis.utils import gains as gains_mod
 from surfvis.utils import products
 from surfvis.utils.msv4 import ignore_xarray_ms_warnings
+from surfvis.web.profiling import span, timed
 
 ignore_xarray_ms_warnings()
 
@@ -103,7 +104,8 @@ def data_group(ms: str, group: str = "base") -> DataGroup:
     """
     from msv4_utils.msv4_types import VISIBILITY_XDS_TYPES
 
-    tree = xarray.open_datatree(ms, engine="xarray-ms:msv2", partition_schema=list(PARTITION_SCHEMA))
+    with span("data_group: open_datatree"):
+        tree = xarray.open_datatree(ms, engine="xarray-ms:msv2", partition_schema=list(PARTITION_SCHEMA))
     for node in tree.children.values():
         if node.attrs.get("type") not in VISIBILITY_XDS_TYPES:
             continue
@@ -120,6 +122,7 @@ def data_group(ms: str, group: str = "base") -> DataGroup:
 
 
 @lru_cache(maxsize=8)
+@timed("open_partition")
 def _open_partition(ms: str, field: int, spw: int, scan: int, fingerprint: tuple) -> xarray.Dataset:
     """Open one (field, spw, scan) partition. Cached -- opening is not free.
 
@@ -134,6 +137,7 @@ def _open_partition(ms: str, field: int, spw: int, scan: int, fingerprint: tuple
     )
 
 
+@timed("fingerprint")
 def _fingerprint(ms: str) -> tuple:
     """A cheap signature of the MS's column storage on disk.
 
@@ -155,6 +159,7 @@ def _fingerprint(ms: str) -> tuple:
     return tuple(sorted(entries))
 
 
+@timed("release_cached_tables")
 def _release_cached_tables() -> None:
     """Drop the tables xarray-ms holds open, so the next read goes to disk.
 
@@ -193,6 +198,7 @@ def _open(ms: str, field: int, spw: int, scan: int) -> xarray.Dataset:
     """
     fingerprint = _fingerprint(ms)
     if _FINGERPRINTS.get(ms) != fingerprint:
+        # Also taken on the first request for an MS, when nothing is cached yet.
         _open_partition.cache_clear()
         data_group.cache_clear()
         _release_cached_tables()
@@ -200,6 +206,7 @@ def _open(ms: str, field: int, spw: int, scan: int) -> xarray.Dataset:
     return _open_partition(ms, field, spw, scan, fingerprint)
 
 
+@timed("available_columns")
 def available_columns(ms: str, field: int, spw: int, scan: int, complex_only: bool = False) -> list[str]:
     """Data variables with a (time, baseline, freq, pol) shape, i.e. plottable.
 
@@ -245,6 +252,7 @@ def field_names(ms: str) -> dict[int, str]:
 
 
 @lru_cache(maxsize=8)
+@timed("antenna_positions")
 def _antenna_positions(ms: str) -> dict[str, np.ndarray]:
     import arcae
 
@@ -305,6 +313,7 @@ def ms_times(ds: xarray.Dataset) -> np.ndarray:
     return times
 
 
+@timed("baseline_rows")
 def baseline_rows(ms: str, field: int, spw: int, scan: int, name1: str, name2: str) -> tuple[np.ndarray, np.ndarray]:
     """Main-table row numbers and TIME values (MJD seconds) of one baseline in one partition.
 
@@ -377,6 +386,7 @@ def invalidate(ms: str) -> None:
     _release_cached_tables()
 
 
+@timed("version_flags")
 def _version_flags(
     ms: str,
     version: str,
@@ -422,6 +432,7 @@ def _version_flags(
     return out
 
 
+@timed("check")
 def check(
     ms: str,
     field: int,
@@ -465,6 +476,7 @@ def check(
     return problems
 
 
+@timed("gains")
 def _gains(
     ms: str, gtable: str, field: int, spw: int, scan: int, ds: xarray.Dataset
 ) -> tuple[products.Gains, list[str]]:
@@ -474,6 +486,7 @@ def _gains(
     return gains, names
 
 
+@timed("waterfall")
 def waterfall(
     ms: str,
     field: int,
@@ -548,12 +561,17 @@ def waterfall(
     corr_idx = [labels_.index(c) for c in read]
 
     sel = {"baseline_id": k, "polarization": corr_idx}
-    vis = ds[resolved].isel(sel).values
-    mvis = ds[group.resolve(model)].isel(sel).values if model else None
+    with span(f"read {resolved}"):
+        vis = ds[resolved].isel(sel).values
+    mvis = None
+    if model:
+        with span(f"read {group.resolve(model)}"):
+            mvis = ds[group.resolve(model)].isel(sel).values
     if flagversion:
         flags = _version_flags(ms, flagversion, field, spw, scan, name1, name2, ms_times(ds), corr_idx)
     else:
-        flags = ds[group.flag].isel(sel).values.astype(bool)
+        with span("read flags"):
+            flags = ds[group.flag].isel(sel).values.astype(bool)
     # xarray-ms lays a regular (time, baseline) grid over the MS and fills gaps
     # with NaN. Those slots hold no data, so treat them as flagged rather than
     # letting them punch holes in the colour scale.
@@ -566,18 +584,19 @@ def waterfall(
     if gains is not None:
         grid = ms_times(ds)
         tidx = gains.time_index(grid, grid)
-    plane, _, pflags = products.form(
-        [product],
-        read,
-        vis,
-        None,  # unit weights; the waterfall plots values only
-        flags,
-        ant1,
-        ant2,
-        tidx=tidx,
-        gains=gains,
-        model=mvis,
-    )
+    with span("form product"):
+        plane, _, pflags = products.form(
+            [product],
+            read,
+            vis,
+            None,  # unit weights; the waterfall plots values only
+            flags,
+            ant1,
+            ant2,
+            tidx=tidx,
+            gains=gains,
+            model=mvis,
+        )
     plane, pflags = plane[..., 0], pflags[..., 0]
 
     if quantity == "phase":
@@ -636,7 +655,9 @@ def cached_plane(
         lock = _PLANE_LOCKS.setdefault(key, threading.Lock())
     # Concurrent misses for one plane wait for the first read instead of each
     # reading the MS (lru_cache does not coalesce them).
-    with lock:
+    with span("cached_plane: wait for lock"):
+        lock.acquire()
+    try:
         return _cached_plane(
             ms,
             field,
@@ -652,6 +673,8 @@ def cached_plane(
             _fingerprint(ms),
             _gtable_stamp(gtable),
         )
+    finally:
+        lock.release()
 
 
 _PLANE_LOCKS: dict[tuple, threading.Lock] = {}
@@ -659,6 +682,7 @@ _PLANE_LOCKS_GUARD = threading.Lock()
 
 
 @lru_cache(maxsize=4)
+@timed("cached_plane: miss")
 def _cached_plane(
     ms, field, spw, scan, name1, name2, product, column, model, gtable, flagversion, fingerprint, gstamp
 ) -> Waterfall:

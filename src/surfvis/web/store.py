@@ -8,6 +8,8 @@ import numpy as np
 import xarray as xr
 import zarr
 
+from surfvis.web.profiling import timed
+
 
 @dataclass(frozen=True)
 class Selection:
@@ -82,6 +84,7 @@ class Chi2Store:
         return [str(v) for v in ds["product"].values]
 
 
+@timed("zarr: scan totals")
 def _scan_totals(ds: xr.Dataset, k: int) -> tuple[np.ndarray, np.ndarray]:
     """One product's chi-squared and counts summed over the scan.
 
@@ -126,6 +129,7 @@ class Matrix:
 
 
 @lru_cache(maxsize=32)
+@timed("zarr: open group")
 def _open_group(path: str, field: int, spw: int, scan: int) -> xr.Dataset:
     # chunks=None reads eagerly into numpy. Without it xarray returns
     # dask-backed arrays, which would make dask a hard requirement of the web

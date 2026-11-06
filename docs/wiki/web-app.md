@@ -3,8 +3,8 @@ type: reference
 title: Chi-squared browser
 description: How surfvis serve links surfchi2 output to on-demand baseline waterfalls, the waterfall's correction / Stokes / flag-version controls, and the xarray-ms facts it depends on.
 tags: [web, fastapi, htmx, xarray-ms, zarr]
-timestamp: 2026-11-05
-last_verified_commit: 00cccac
+timestamp: 2026-11-06
+last_verified_commit: HEADSHA
 ---
 
 # Chi-squared browser
@@ -310,6 +310,34 @@ The canvas waterfall is in place, but it has no selection tool yet (step 3 of
   casacore shares the underlying table, and the tests confirm reads see writes.
 - `Flagger` serialises apply/undo with a lock: FastAPI runs sync routes in a
   thread pool.
+
+## Profiling (`serve --profile DIR`)
+
+`web/profiling.py`. Off by default, and then a `span()` costs one context
+variable lookup. With a directory:
+
+- `ProfileMiddleware` gives each request a span list in a `ContextVar`.
+  Starlette copies the context into the worker thread a sync route runs in, so
+  `span()` / `@timed()` anywhere in `msdata`, `store` or `app` lands on the
+  request that caused it. Spans nest (indent = depth) and are listed in the
+  order they *finished*, so a parent follows its children.
+- Each response carries `Server-Timing` (the browser's network panel draws
+  it); one block per request goes to stderr and a JSON line to
+  `DIR/spans.jsonl`. `python -m surfvis.web.profiling DIR` totals by span.
+- Routes are wrapped in `@profiling.cprofiled`, which runs cProfile in the
+  route's own thread (cProfile sees only the thread that enabled it) and dumps
+  `DIR/<time>-<route>.prof` when the request took over `SLOW` (1 s). One
+  profiler at a time: an overlapping request just isn't cProfiled.
+
+Spans sit on the cache *misses* (`@timed` below `@lru_cache`), so a hit does
+not appear at all. The expensive ones to watch: `data_group: open_datatree`
+(opens every partition of the MS), `open_partition`, `baseline_rows` (two
+TaQL queries per waterfall via `stored_order`), and the column reads.
+
+First finding (16 antennas, 3 scans, 1.6 GB synthetic MS): the first
+`/waterfall` opens the datatree **twice**. `_resolve()` calls `data_group`,
+then the first `_open()` sees no stored fingerprint for the MS, clears
+`data_group`'s cache with the others, and `check()` opens it again.
 
 ## Colour scaling
 

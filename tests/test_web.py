@@ -5,6 +5,8 @@ checks that the pipeline carries that outlier through to something a human
 would see.
 """
 
+import json
+
 import pytest
 
 from tests.conftest import needs_ms, needs_web
@@ -798,3 +800,44 @@ def test_waterfall_bin_reads_the_ms_once_across_heatmaps(chi2_zarr, monkeypatch)
         chi2_zarr["ms"]["path"], 0, 0, 1, *chi2_zarr["ms"]["antenna_names"][1:6:4], "XX", "RESIDUAL"
     )
     assert cached.plane.dtype == np.complex64 and cached.values is None
+
+
+@needs_web
+def test_profile_reports_where_a_request_spent_its_time(chi2_zarr, tmp_path, monkeypatch):
+    """serve --profile: spans from deep in msdata reach the request's Server-Timing, the log and a cProfile dump."""
+    pytest.importorskip("httpx2")
+    import pstats
+
+    from fastapi.testclient import TestClient
+
+    from surfvis.web import msdata, profiling
+    from surfvis.web.app import create_app
+
+    msdata.invalidate(chi2_zarr["ms"]["path"])
+    monkeypatch.setattr(profiling, "SLOW", 0.0)
+    out = tmp_path / "profile"
+    try:
+        client = TestClient(create_app(chi2_zarr["zarr"], profile=out))
+        r = client.get("/waterfall.bin?field=0&spw=0&scan=1&c=XX&p=1&q=5&column=RESIDUAL")
+    finally:
+        profiling.enable(None)
+    assert r.status_code == 200
+    timing = r.headers["server-timing"]
+    for name in ("cached_plane__miss", "open_partition", "read_RESIDUAL", "encode", "total;dur="):
+        assert name in timing, timing
+
+    (record,) = [json.loads(line) for line in (out / "spans.jsonl").read_text().splitlines()]
+    names = [s["name"] for s in record["spans"]]
+    assert record["path"] == "/waterfall.bin" and record["status"] == 200
+    assert "waterfall" in names and "read flags" in names
+    # Nested: the MS read happens inside the cache miss.
+    depth = {s["name"]: s["depth"] for s in record["spans"]}
+    assert depth["read RESIDUAL"] > depth["cached_plane: miss"]
+    assert "read RESIDUAL" in profiling.summarise(out)
+
+    (dump,) = out.glob("*-waterfall_bin.prof")
+    assert pstats.Stats(str(dump)).total_tt > 0
+
+    # Off again: no header, nothing written.
+    quiet = TestClient(create_app(chi2_zarr["zarr"]))
+    assert "server-timing" not in quiet.get("/healthz").headers

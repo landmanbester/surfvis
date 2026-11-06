@@ -180,6 +180,7 @@ Useful flags:
 | `--port` | `8000` | Change if the port is taken. |
 | `--allow-flagging` | off | Let the browser write FLAG (see below). |
 | `--reload` | off | Development only. |
+| `--profile DIR` | off | Time every request: a per-step breakdown is printed, appended to `DIR/spans.jsonl` and sent as a `Server-Timing` header (the browser's network panel shows it). Requests over a second also leave a cProfile dump in `DIR`. `python -m surfvis.web.profiling DIR` totals the steps. |
 
 `--host 127.0.0.1` means nothing outside the machine can reach it. That is the
 right default; to view it from your laptop, forward the port rather than

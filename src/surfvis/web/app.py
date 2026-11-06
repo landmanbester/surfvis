@@ -15,7 +15,7 @@ from pydantic import BaseModel, Field
 
 from surfvis.utils import gains as gains_mod
 from surfvis.utils import products as products_mod
-from surfvis.web import msdata, planes, render
+from surfvis.web import msdata, planes, profiling, render
 from surfvis.web.flagging import BackupPendingError, Flagger
 from surfvis.web.store import Chi2Store, Selection
 
@@ -25,6 +25,7 @@ HERE = Path(__file__).parent
 # re-imports: reload needs an import string, not an app object.
 ENV_DATA, ENV_MS, ENV_GTABLES = "SURFVIS_SERVE_DATA", "SURFVIS_SERVE_MS", "SURFVIS_SERVE_GTABLES"
 ENV_FLAGGING = "SURFVIS_SERVE_ALLOW_FLAGGING"
+ENV_PROFILE = "SURFVIS_SERVE_PROFILE"
 
 
 class FlagRequest(BaseModel):
@@ -64,6 +65,7 @@ def app_from_env() -> FastAPI:
         os.environ.get(ENV_MS) or None,
         gtables=gtables,
         allow_flagging=bool(os.environ.get(ENV_FLAGGING)),
+        profile=os.environ.get(ENV_PROFILE) or None,
     )
 
 
@@ -72,6 +74,7 @@ def create_app(
     ms: str | Path | None = None,
     gtables: list[str] | None = None,
     allow_flagging: bool = False,
+    profile: str | Path | None = None,
 ) -> FastAPI:
     """Build the app around one chi-squared dataset.
 
@@ -85,12 +88,16 @@ def create_app(
             query string must not be able to name arbitrary directories.
         allow_flagging: Enable the routes that write FLAG. Off by default:
             the browser is read-only unless asked otherwise.
+        profile: Directory to write request timings and cProfile dumps of
+            slow requests to (see :mod:`surfvis.web.profiling`). Off if None.
 
     Returns:
         A configured :class:`fastapi.FastAPI` instance.
     """
+    profiling.enable(profile)
     store = Chi2Store(data)
     app = FastAPI(title="surfvis")
+    app.add_middleware(profiling.ProfileMiddleware)
     app.mount("/static", RevalidatedStaticFiles(directory=HERE / "static"), name="static")
     templates = Jinja2Templates(directory=HERE / "templates")
     # StaticFiles sends no Cache-Control, so browsers cache by heuristic and
@@ -103,6 +110,7 @@ def create_app(
 
     recorded = sorted({store.attrs(*key).get("gtable", "") for key in store.scans} - {""})
 
+    @profiling.timed("gain_tables")
     def _gain_tables() -> dict[str, str]:
         """Offered gain terms, as {real path: spelling shown}. Re-scanned per request, so new solves appear."""
         listed = list(recorded) + list(gtables or []) + gains_mod.find_terms(str(Path(ms_path).resolve().parent))
@@ -114,6 +122,7 @@ def create_app(
     def _allowed(gtable: str) -> bool:
         return not gtable or os.path.realpath(gains_mod.term_path(gtable)) in _gain_tables()
 
+    @profiling.timed("store.matrix")
     def _matrix(field, spw, scan, c):
         try:
             return store.matrix(Selection(field=field, spw=spw, scan=scan, product=c))
@@ -141,6 +150,7 @@ def create_app(
         }
 
     @app.get("/", response_class=HTMLResponse)
+    @profiling.cprofiled
     def index(request: Request):
         field, spw, scan = store.scans[0]
         return templates.TemplateResponse(
@@ -148,6 +158,7 @@ def create_app(
         )
 
     @app.get("/scans", response_class=HTMLResponse)
+    @profiling.cprofiled
     def scans(
         request: Request,
         field: int = Query(...),
@@ -168,6 +179,7 @@ def create_app(
         return templates.TemplateResponse(request, "_selectors.html", _selectors(request, field, spw, scan, c, scale))
 
     @app.get("/heatmap", response_class=HTMLResponse)
+    @profiling.cprofiled
     def heatmap(
         request: Request,
         field: int = Query(...),
@@ -213,6 +225,7 @@ def create_app(
         )
 
     @app.get("/histogram.png")
+    @profiling.cprofiled
     def histogram_png(
         field: int = Query(...),
         spw: int = Query(...),
@@ -225,7 +238,8 @@ def create_app(
             norm, _, _ = render.make_norm(matrix.chi2_dof, scale)
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
-        png = render.histogram_png(matrix.chi2_dof, norm)
+        with profiling.span("render histogram"):
+            png = render.histogram_png(matrix.chi2_dof, norm)
         return Response(png, media_type="image/png")
 
     def _resolve(column: str) -> str:
@@ -253,6 +267,7 @@ def create_app(
         }
 
     @app.get("/waterfall", response_class=HTMLResponse)
+    @profiling.cprofiled
     def waterfall(
         request: Request,
         field: int = Query(...),
@@ -326,6 +341,7 @@ def create_app(
         )
 
     @app.get("/waterfall.png")
+    @profiling.cprofiled
     def waterfall_png(
         field: int = Query(...),
         spw: int = Query(...),
@@ -358,9 +374,12 @@ def create_app(
             )
         except (KeyError, ValueError, FileNotFoundError) as exc:
             raise HTTPException(status_code=404, detail=str(exc)) from exc
-        return Response(render.waterfall_png(wf), media_type="image/png")
+        with profiling.span("render png"):
+            png = render.waterfall_png(wf)
+        return Response(png, media_type="image/png")
 
     @app.get("/waterfall.bin")
+    @profiling.cprofiled
     def waterfall_bin(
         field: int = Query(...),
         spw: int = Query(...),
@@ -410,11 +429,13 @@ def create_app(
         if t0 >= t1 or c0 >= c1:
             raise HTTPException(status_code=400, detail=f"Empty window: slots {t0}-{t1}, channels {c0}-{c1}")
         cap = planes.MAX_BINS
-        block = planes.reduce_block(
-            wf.plane, wf.flags, quantity, t0, t1, c0, c1, min(max(max_t, 1), cap), min(max(max_c, 1), cap)
-        )
+        with profiling.span("reduce_block"):
+            block = planes.reduce_block(
+                wf.plane, wf.flags, quantity, t0, t1, c0, c1, min(max(max_t, 1), cap), min(max(max_c, 1), cap)
+            )
         if quantity not in wf.limits:  # cached with the plane; colours do not move on zoom
-            wf.limits[quantity] = planes.colour_limits(wf.plane, wf.flags, quantity)
+            with profiling.span("colour_limits"):
+                wf.limits[quantity] = planes.colour_limits(wf.plane, wf.flags, quantity)
         vmin, vmax = wf.limits[quantity]
         length = f" ({wf.length:.0f} m)" if wf.length is not None else ""
         header = {
@@ -435,8 +456,10 @@ def create_app(
         if meta:
             header["times"] = [float(x) for x in wf.times] if wf.times is not None else None
             header["freqs"] = [float(x) for x in wf.freqs] if wf.freqs is not None else None
+        with profiling.span("encode"):
+            body = planes.encode(header, block)
         return Response(
-            planes.encode(header, block),
+            body,
             media_type="application/octet-stream",
             headers={"Cache-Control": "no-store"},
         )
@@ -452,6 +475,7 @@ def create_app(
         return flagger
 
     @app.post("/flag")
+    @profiling.cprofiled
     def flag(req: FlagRequest):
         """Flag the cells inside a polygon on one baseline, or count them with ``dry_run``."""
         flagger_ = _flagger()
