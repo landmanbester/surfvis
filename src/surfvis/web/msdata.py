@@ -94,31 +94,27 @@ class Waterfall:
     limits: dict = field(default_factory=dict, compare=False, repr=False)
 
 
-@lru_cache(maxsize=8)
+# The one data group xarray-ms's MSv2 backend defines. It is a constant
+# (``MSv2EntryPoint.postprocess_datasets`` writes it into the datatree's
+# ``data_groups``), so nothing is opened to learn it.
+_MSV2_GROUPS = {"base": DataGroup(correlated_data="VISIBILITY", weight="WEIGHT", flag="FLAG")}
+
+
 def data_group(ms: str, group: str = "base") -> DataGroup:
     """Resolve the MSv4 data group for an MS.
 
-    ``data_groups`` is attached by ``open_datatree`` (not ``open_dataset``), so
-    this opens the tree once and caches the result -- it is identical across
-    partitions.
-    """
-    from msv4_utils.msv4_types import VISIBILITY_XDS_TYPES
+    Not read from ``open_datatree``'s ``data_groups``: that opens every
+    partition, and xarray-ms scans the row shapes of every extra column in
+    each, which on a large MS took over ten minutes, for a value the backend
+    hard-codes. ``ms`` is kept so callers need not change if that stops being
+    true.
 
-    with span("data_group: open_datatree"):
-        tree = xarray.open_datatree(ms, engine="xarray-ms:msv2", partition_schema=list(PARTITION_SCHEMA))
-    for node in tree.children.values():
-        if node.attrs.get("type") not in VISIBILITY_XDS_TYPES:
-            continue
-        groups = node.ds.attrs.get("data_groups", {})
-        if group not in groups:
-            raise KeyError(f"No data group {group!r} in {ms}. Have: {sorted(groups)}")
-        spec = groups[group]
-        return DataGroup(
-            correlated_data=spec["correlated_data"],
-            weight=spec["weight"],
-            flag=spec.get("flag", "FLAG"),
-        )
-    raise ValueError(f"{ms} contains no visibility partitions")
+    Raises:
+        KeyError: for a group other than ``base``.
+    """
+    if group not in _MSV2_GROUPS:
+        raise KeyError(f"No data group {group!r} in {ms}. Have: {sorted(_MSV2_GROUPS)}")
+    return _MSV2_GROUPS[group]
 
 
 @lru_cache(maxsize=8)
@@ -200,7 +196,6 @@ def _open(ms: str, field: int, spw: int, scan: int) -> xarray.Dataset:
     if _FINGERPRINTS.get(ms) != fingerprint:
         # Also taken on the first request for an MS, when nothing is cached yet.
         _open_partition.cache_clear()
-        data_group.cache_clear()
         _release_cached_tables()
         _FINGERPRINTS[ms] = fingerprint
     return _open_partition(ms, field, spw, scan, fingerprint)
@@ -382,7 +377,6 @@ def invalidate(ms: str) -> None:
     _FINGERPRINTS.pop(ms, None)
     _open_partition.cache_clear()
     _cached_plane.cache_clear()
-    data_group.cache_clear()
     _release_cached_tables()
 
 

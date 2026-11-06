@@ -104,6 +104,8 @@ def create_app(
     # keep serving an old stylesheet after an upgrade. A version in the URL
     # makes every change a new resource.
     templates.env.globals["static_version"] = _static_version(HERE / "static")
+    # Jinja renders inside TemplateResponse; the heatmap's thousands of cells make that a real cost.
+    templates.TemplateResponse = profiling.timed("render template")(templates.TemplateResponse)
 
     first = store.scans[0]
     ms_path = str(ms) if ms is not None else store.matrix(Selection(*first, store.products(*first)[0])).ms

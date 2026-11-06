@@ -841,3 +841,25 @@ def test_profile_reports_where_a_request_spent_its_time(chi2_zarr, tmp_path, mon
     # Off again: no header, nothing written.
     quiet = TestClient(create_app(chi2_zarr["zarr"]))
     assert "server-timing" not in quiet.get("/healthz").headers
+
+
+@needs_web
+def test_a_waterfall_opens_one_partition_not_the_whole_ms(chi2_zarr, monkeypatch):
+    """open_datatree opens every partition; on a large MS that took over ten minutes before the first waterfall."""
+    pytest.importorskip("httpx2")
+    import xarray
+    from fastapi.testclient import TestClient
+
+    from surfvis.web import msdata
+    from surfvis.web.app import create_app
+
+    msdata.invalidate(chi2_zarr["ms"]["path"])
+    trees = []
+    real = xarray.open_datatree
+    monkeypatch.setattr(xarray, "open_datatree", lambda *a, **k: trees.append(a) or real(*a, **k))
+    client = TestClient(create_app(chi2_zarr["zarr"]))
+    query = "field=0&spw=0&scan=1&c=XX&p=1&q=5"
+    panel = client.get(f"/waterfall?{query}")
+    assert panel.status_code == 200 and "Cannot open" not in panel.text
+    assert client.get(f"/waterfall.bin?{query}").status_code == 200
+    assert trees == []

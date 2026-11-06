@@ -8,7 +8,11 @@ Off unless ``surfvis serve --profile DIR`` turns it on, and then:
   spans in the order they finished, indented by nesting;
 - a request slower than :data:`SLOW` seconds also leaves a cProfile dump,
   ``DIR/<time>-<route>.prof``, for whatever the spans did not anticipate
-  (read it with ``python -m pstats`` or snakeviz).
+  (read it with ``python -m pstats`` or snakeviz);
+- a request still running after :data:`STUCK` seconds is reported every
+  :data:`STUCK` seconds with the spans it is inside, since the per-request
+  line only appears once it finishes;
+- ``kill -USR1 <pid>`` prints every thread's Python stack (``faulthandler``).
 
 Spans are recorded through a context variable, which Starlette copies into the
 worker thread a sync route runs in, so ``span()`` deep inside ``msdata`` lands
@@ -31,6 +35,8 @@ from pathlib import Path
 
 # Seconds; requests slower than this leave a cProfile dump.
 SLOW = 1.0
+# Seconds; running requests are reported this often once they have run this long.
+STUCK = 10.0
 
 _DIR: Path | None = None
 _REQUEST: ContextVar["_Request | None"] = ContextVar("surfvis_profile_request", default=None)
@@ -38,11 +44,18 @@ _DEPTH: ContextVar[int] = ContextVar("surfvis_profile_depth", default=0)
 # cProfile cannot run two profilers at once on 3.12+ (sys.monitoring), and
 # overlapping ones would muddle each other anyway: one request at a time.
 _CPROFILE = threading.Lock()
+_ACTIVE: dict[int, "_Request"] = {}
+_ACTIVE_LOCK = threading.Lock()
+_WATCHDOG: threading.Thread | None = None
 
 
 @dataclass
 class _Request:
+    label: str = ""
+    start: float = field(default_factory=time.perf_counter)
     spans: list[tuple[str, float, int]] = field(default_factory=list)
+    # Spans entered and not yet left: (name, start).
+    open: list[tuple[str, float]] = field(default_factory=list)
     lock: threading.Lock = field(default_factory=threading.Lock)
 
 
@@ -51,10 +64,43 @@ def enable(directory: str | Path | None) -> None:
 
     Process-wide, like the caches it measures: the last app built decides.
     """
-    global _DIR
+    global _DIR, _WATCHDOG
     _DIR = None if directory is None else Path(directory)
-    if _DIR is not None:
-        _DIR.mkdir(parents=True, exist_ok=True)
+    if _DIR is None:
+        return
+    _DIR.mkdir(parents=True, exist_ok=True)
+    try:
+        import faulthandler
+        import signal
+
+        faulthandler.register(signal.SIGUSR1, all_threads=True)
+    except (AttributeError, ValueError, ImportError):  # pragma: no cover - not on Windows / not main thread
+        pass
+    if _WATCHDOG is None:
+        _WATCHDOG = threading.Thread(target=_watch, name="surfvis-profile-watchdog", daemon=True)
+        _WATCHDOG.start()
+
+
+def _watch() -> None:
+    """Report requests that have run longer than STUCK, and where they are."""
+    while True:
+        time.sleep(STUCK)
+        if _DIR is None:
+            continue
+        now = time.perf_counter()
+        with _ACTIVE_LOCK:
+            running = list(_ACTIVE.values())
+        for request in running:
+            if now - request.start < STUCK:
+                continue
+            with request.lock:
+                inside = [f"{name} ({now - t:.0f} s)" for name, t in request.open]
+            where = " > ".join(inside) or "outside any span"
+            print(
+                f"[profile] still running after {now - request.start:.0f} s: {request.label} in {where}",
+                file=sys.stderr,
+                flush=True,
+            )
 
 
 def enabled() -> bool:
@@ -71,12 +117,16 @@ def span(name: str):
     depth = _DEPTH.get()
     token = _DEPTH.set(depth + 1)
     start = time.perf_counter()
+    entry = (name, start)
+    with request.lock:
+        request.open.append(entry)
     try:
         yield
     finally:
         elapsed = time.perf_counter() - start
         _DEPTH.reset(token)
         with request.lock:
+            request.open.remove(entry)
             request.spans.append((name, elapsed, depth))
 
 
@@ -133,9 +183,12 @@ class ProfileMiddleware:
             await self.app(scope, receive, send)
             return
 
-        request = _Request()
+        query = scope.get("query_string", b"").decode()
+        request = _Request(label=f"{scope['method']} {scope['path']}" + (f"?{query}" if query else ""))
         token = _REQUEST.set(request)
-        start = time.perf_counter()
+        start = request.start
+        with _ACTIVE_LOCK:
+            _ACTIVE[id(request)] = request
         status = 0
 
         async def send_with_timing(message):
@@ -151,6 +204,8 @@ class ProfileMiddleware:
             await self.app(scope, receive, send_with_timing)
         finally:
             _REQUEST.reset(token)
+            with _ACTIVE_LOCK:
+                _ACTIVE.pop(id(request), None)
             _report(scope, status, time.perf_counter() - start, request)
 
 

@@ -49,7 +49,7 @@ docker run --rm --user "$(id -u):$(id -g)" -e HOME=/tmp -v "$PWD":/src -w /src \
    PYTHONPATH=/tmp/t:/src/src:/src /tmp/t/bin/pytest tests/ -q -W ignore"
 ```
 
-That is the only way to run the full suite (100 tests; the node one skips in the container). **CI does not run them** —
+That is the only way to run the full suite (101 tests; the node one skips in the container). **CI does not run them** —
 `.github/workflows/ci.yml` installs the lightweight package only, deliberately,
 since python-casacore and numba make CI slow and brittle. Verify locally.
 
@@ -147,9 +147,12 @@ forever, with no output. The failure is load-dependent, so it presents as an
 intermittent hang.
 
 **MSv4 renames columns; resolve, do not hardcode.** `DATA` is exposed as
-`VISIBILITY`, `WEIGHT_SPECTRUM` as `WEIGHT`. Read them from
-`attrs["data_groups"][group]`, as `pfb-imaging`'s `core/imager.py` does.
-`data_groups` is attached by `open_datatree`, **not** `open_dataset`. Columns
+`VISIBILITY`, `WEIGHT_SPECTRUM` as `WEIGHT`, through `msdata.data_group()`.
+`data_groups` is attached by `open_datatree`, **not** `open_dataset`, but
+**never open the datatree to read it**: that opens every partition, and
+xarray-ms scans every extra column's row shapes in each -- over ten minutes on
+a real MS before the first waterfall. The MSv2 backend hard-codes the one
+`base` group, so `data_group()` returns that constant. Columns
 outside the MSv2 standard (`RESIDUAL`) are not renamed, and neither are
 `CORRECTED_DATA` and `MODEL_DATA`: xarray-ms keeps them as secondary variables
 under their own names. Mapping `CORRECTED_DATA` to `VISIBILITY` (as
