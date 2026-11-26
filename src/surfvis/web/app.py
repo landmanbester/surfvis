@@ -2,6 +2,7 @@
 
 import hashlib
 import os
+import sys
 from pathlib import Path
 from typing import Literal
 from urllib.parse import urlencode
@@ -15,7 +16,7 @@ from pydantic import BaseModel, Field
 
 from surfvis.utils import gains as gains_mod
 from surfvis.utils import products as products_mod
-from surfvis.web import msdata, planes, profiling, render
+from surfvis.web import flagging, msdata, planes, profiling, render
 from surfvis.web.flagging import BackupPendingError, Flagger
 from surfvis.web.store import Chi2Store, Selection
 
@@ -469,8 +470,18 @@ def create_app(
 
     flagger = Flagger(ms_path) if allow_flagging else None
     if flagger is not None:
+        # Before the backup, so the backup is of a consistent FLAG.
+        if flagger.recover():
+            print(f"surfvis: {flagger.recovered}", file=sys.stderr, flush=True)
         # Copying FLAG takes minutes on a large MS; do it now, not inside the first /flag request.
         flagger.start_backup()
+    elif (journal := flagging.journal_path(ms_path)) is not None:
+        print(
+            f"surfvis: a flag write to {ms_path} was interrupted (journal at {journal}); "
+            "restart with --allow-flagging to roll it back",
+            file=sys.stderr,
+            flush=True,
+        )
 
     def _flagger() -> Flagger:
         if flagger is None:
@@ -525,6 +536,8 @@ def create_app(
             "backup": flagger.backup,
             "backup_state": flagger.backup_state,
             "backup_error": flagger.backup_error,
+            "recovered": flagger.recovered,
+            "broken": flagger.broken,
             "edits": [
                 {"id": e.id, "description": e.description, "cells": e.cells, "newly_flagged": e.newly_flagged}
                 for e in flagger.edits

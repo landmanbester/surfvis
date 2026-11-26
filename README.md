@@ -387,6 +387,14 @@ flagging session saves FLAG as a CASA flag version named
 `surfvis_before_<UTC timestamp>`, so `flagmanager` (or the flags menu) can
 restore it.
 
+A crash, `kill -9` or power cut in the middle of a write cannot leave the MS
+unopenable or an edit half-applied. Every write is journalled in
+`<ms>.flagversions/surfvis_journal/` first, and the next `surfvis serve
+--allow-flagging` on that MS rolls the interrupted edit back, restoring any
+storage-manager header the interruption broke, before it does anything else.
+Started without `--allow-flagging`, it warns that a journal is waiting. Leave
+the journal alone; it is deleted once it has been applied.
+
 ## Development
 
 Requires [uv](https://docs.astral.sh/uv/).

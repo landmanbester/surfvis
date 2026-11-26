@@ -6,18 +6,33 @@ is one code path. The server rasterises it (:func:`rasterise`) and that mask is
 what gets written, so a client-side preview, the write and any log agree on
 which cells were flagged.
 
-Writes are guarded three ways. ``serve`` must be started with
+Writes are guarded four ways. ``serve`` must be started with
 ``--allow-flagging``. Before the first write of a session the current FLAG is
 saved as a CASA flag version (:func:`save_flag_version`), restorable with
-CASA's ``flagmanager``. And every write records the cells it turned on, so
-:meth:`Flagger.undo` clears exactly those and nothing else.
+CASA's ``flagmanager``. Every write records the cells it turned on, so
+:meth:`Flagger.undo` clears exactly those and nothing else. And every write
+is journalled, so a crash part-way through cannot leave the MS unopenable or
+an edit half-applied (see :func:`recover`).
+
+Why the journal: when casacore flushes a TiledShapeStMan -- which is where
+real Measurement Sets keep FLAG -- it truncates the storage manager's header
+file (``table.f<n>``) and writes it again, and fsyncs neither the header nor
+the tiles. A process killed between the truncate and the write leaves an
+empty header, and the MS no longer opens. A flag write never changes that
+header (it only rewrites tiles in place), so a copy taken just before the
+write restores it exactly.
 
 Design and plan: https://github.com/ratt-ru/surfvis/issues/16
 """
 
+import atexit
+import filecmp
+import json
 import os
+import shutil
+import sys
 import threading
-from contextlib import nullcontext
+import weakref
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 
@@ -26,6 +41,14 @@ import numpy as np
 # Rows per read/write when copying FLAG for a backup: bounds memory on a large
 # MS (a MeerKAT row is up to 32k channels x 4 correlations).
 BACKUP_CHUNK_BYTES = 256 * 2**20
+
+# The write journal, in ``<ms>.flagversions/``. Present only while a write is
+# in progress, or after one was interrupted.
+JOURNAL = "surfvis_journal"
+# Storage-manager files above this size hold column data written in place
+# (a StandardStMan's buckets), not a header casacore rewrites; they are not
+# copied into the journal.
+HEADER_LIMIT = 64 * 2**20
 
 
 def rasterise(vertices: np.ndarray, ntime: int, nchan: int) -> np.ndarray:
@@ -96,11 +119,15 @@ def save_flag_version(ms: str, name: str, comment: str) -> str:
     import arcae
     from arcae.lib.arrow_tables import Table
 
-    root = f"{ms.rstrip('/')}.flagversions"
+    root = _versions_root(ms)
     path = f"{root}/flags.{name}"
     if os.path.exists(path):
         raise FileExistsError(f"Flag version {name!r} already exists at {path}")
     os.makedirs(root, exist_ok=True)
+    # Written under a hidden name and renamed when complete and on disk, so a
+    # backup cut short never passes for a usable flag version.
+    partial = f"{root}/.flags.{name}.partial"
+    shutil.rmtree(partial, ignore_errors=True)
 
     src = arcae.table(ms)
     try:
@@ -111,7 +138,7 @@ def save_flag_version(ms: str, name: str, comment: str) -> str:
         # ``_c_order`` hint says a fixed cell shape is in C order; dropping it
         # transposes the shape of a tiled FLAG column.
         table_desc = {col: desc[col] for col in ("FLAG", "FLAG_ROW")}
-        dest = Table.from_descriptor(path, table_desc=table_desc)
+        dest = Table.from_descriptor(partial, table_desc=table_desc)
         try:
             dest.addrows(nrow)
             for start, stop in _runs(ddid):
@@ -128,9 +155,240 @@ def save_flag_version(ms: str, name: str, comment: str) -> str:
     finally:
         src.close()
 
+    for entry in os.listdir(partial):
+        if os.path.isfile(os.path.join(partial, entry)):
+            _fsync(os.path.join(partial, entry))
+    _fsync(partial)
+    os.rename(partial, path)
+    _fsync(root)
     with open(f"{root}/FLAG_VERSION_LIST", "a") as listing:
         listing.write(f"{name} : {comment}\n")
+        listing.flush()
+        os.fsync(listing.fileno())
     return name
+
+
+def _versions_root(ms: str) -> str:
+    return f"{ms.rstrip('/')}.flagversions"
+
+
+def _fsync(path: str) -> None:
+    """Push a file's (or a directory's entries') writes to disk."""
+    fd = os.open(path, os.O_RDONLY)
+    try:
+        os.fsync(fd)
+    finally:
+        os.close(fd)
+
+
+def _storage_files(ms: str, table) -> tuple[list[str], list[str]]:
+    """The files of the storage managers holding FLAG and FLAG_ROW.
+
+    Returns:
+        ``(headers, files)``: the ``table.f<n>`` files small enough to be
+        headers, which go in the journal, and every file of those storage
+        managers (``table.f<n>`` and ``table.f<n>_TSM*``), which are fsynced
+        after a write.
+    """
+    seqs = sorted(
+        int(info["SEQNR"]) for info in table.getdminfo().values() if {"FLAG", "FLAG_ROW"} & set(info.get("COLUMNS", ()))
+    )
+    names = os.listdir(ms)
+    headers, files = [], []
+    for seq in seqs:
+        base = f"table.f{seq}"
+        files += sorted(n for n in names if n == base or n.startswith(base + "_"))
+        if base in names and os.path.getsize(os.path.join(ms, base)) <= HEADER_LIMIT:
+            headers.append(base)
+    return headers, files
+
+
+def _write_journal(ms: str, edit: "Edit", headers: list[str]) -> None:
+    """Record an edit and copy the storage-manager headers, durably, before a write touches the MS.
+
+    Built under a temporary name and renamed into place, so a journal is
+    either complete or absent.
+    """
+    root = _versions_root(ms)
+    os.makedirs(root, exist_ok=True)
+    tmp = os.path.join(root, f".{JOURNAL}.tmp")
+    shutil.rmtree(tmp, ignore_errors=True)
+    os.makedirs(os.path.join(tmp, "headers"))
+    for name in headers:
+        shutil.copyfile(os.path.join(ms, name), os.path.join(tmp, "headers", name))
+        _fsync(os.path.join(tmp, "headers", name))
+    np.savez(
+        os.path.join(tmp, "edit.npz"),
+        rows=edit.rows,
+        changed_row=edit.changed[0],
+        changed_chan=edit.changed[1],
+        changed_corr=edit.changed[2],
+        row_set=edit.row_set,
+    )
+    with open(os.path.join(tmp, "journal.json"), "w") as meta:
+        json.dump({"ms": os.path.abspath(ms), "headers": headers, "description": edit.description}, meta)
+    for name in ("edit.npz", "journal.json"):
+        _fsync(os.path.join(tmp, name))
+    _fsync(os.path.join(tmp, "headers"))
+    _fsync(tmp)
+    os.rename(tmp, os.path.join(root, JOURNAL))
+    _fsync(root)
+
+
+def _clear_journal(ms: str) -> None:
+    """Retire the journal: renamed aside first, so a crash mid-delete never leaves a partial one."""
+    root = _versions_root(ms)
+    done = os.path.join(root, f".{JOURNAL}.done")
+    shutil.rmtree(done, ignore_errors=True)
+    os.rename(os.path.join(root, JOURNAL), done)
+    _fsync(root)
+    shutil.rmtree(done, ignore_errors=True)
+
+
+def journal_path(ms: str) -> str | None:
+    """The journal an interrupted write left behind, or None."""
+    path = os.path.join(_versions_root(ms), JOURNAL)
+    return path if os.path.isdir(path) else None
+
+
+# Run by _opens in a child process.
+_PROBE = """
+import sys
+import numpy as np
+import arcae
+
+table = arcae.table(sys.argv[1])
+try:
+    if table.nrow():
+        first = (np.arange(1, dtype=np.int64),)
+        table.getcol("FLAG", index=first)
+        table.getcol("FLAG_ROW", index=first)
+finally:
+    table.close()
+"""
+
+
+def _opens(ms: str) -> bool:
+    """Whether the MS opens and its FLAG and FLAG_ROW can be read.
+
+    Tried in a child process. A failed open inside this one can leave a
+    casacore read lock held in casacore's in-process lock registry, and the
+    next write then waits for it forever.
+    """
+    import subprocess
+
+    try:
+        probe = subprocess.run([sys.executable, "-c", _PROBE, ms], capture_output=True, timeout=600, check=False)
+    except subprocess.TimeoutExpired:
+        return False
+    return probe.returncode == 0
+
+
+def _put_cells(table, edit: "Edit", on: bool) -> None:
+    """Set (``on``) or clear an edit's cells, reading the rows as they are now.
+
+    Setting turns on FLAG_ROW for the rows the edit recorded; clearing
+    recomputes it for those rows from FLAG. Either is idempotent, which is
+    what lets recovery simply run the clear again.
+    """
+    flag = np.array(table.getcol("FLAG", index=(edit.rows,)), dtype=bool)
+    flag[edit.changed] = on
+    table.putcol("FLAG", flag, index=(edit.rows,))
+    if edit.row_set.size:
+        flag_row = np.array(table.getcol("FLAG_ROW", index=(edit.rows,)), dtype=bool)
+        flag_row[edit.row_set] = True if on else flag[edit.row_set].all(axis=(1, 2))
+        table.putcol("FLAG_ROW", flag_row, index=(edit.rows,))
+
+
+def recover(ms: str) -> str | None:
+    """Undo whatever a write interrupted by a crash, kill or power cut left behind.
+
+    Run before anything else opens the MS for writing (``serve
+    --allow-flagging`` does so at startup). If the MS no longer opens, the
+    storage-manager headers saved in the journal are put back (the files as
+    found are kept in the journal's ``found/``); then the interrupted edit's
+    cells are cleared, which rolls back an apply and completes an undo. Safe to
+    run again if it is itself interrupted.
+
+    Returns:
+        What was done, or None when there was no journal.
+
+    Raises:
+        RuntimeError: if the MS still does not open with the headers restored.
+    """
+    import arcae
+
+    path = journal_path(ms)
+    root = _versions_root(ms)
+    for stale in (f".{JOURNAL}.tmp", f".{JOURNAL}.done"):
+        shutil.rmtree(os.path.join(root, stale), ignore_errors=True)
+    if path is None:
+        return None
+    with open(os.path.join(path, "journal.json")) as meta_file:
+        meta = json.load(meta_file)
+    saved = np.load(os.path.join(path, "edit.npz"))
+    edit = Edit(
+        id=0,
+        rows=saved["rows"].astype(np.int64),
+        corr_idx=[],
+        changed=(saved["changed_row"], saved["changed_chan"], saved["changed_corr"]),
+        row_set=saved["row_set"],
+        cells=0,
+        newly_flagged=0,
+        description=meta["description"],
+    )
+
+    restored = []
+    if not _opens(ms):
+        os.makedirs(os.path.join(path, "found"), exist_ok=True)
+        for name in meta["headers"]:
+            snapshot, current = os.path.join(path, "headers", name), os.path.join(ms, name)
+            if os.path.exists(current) and filecmp.cmp(snapshot, current, shallow=False):
+                continue
+            if os.path.exists(current):
+                shutil.copyfile(current, os.path.join(path, "found", name))
+            staged = current + ".surfvis-restore"
+            shutil.copyfile(snapshot, staged)
+            _fsync(staged)
+            os.replace(staged, current)
+            restored.append(name)
+        _fsync(ms)
+        if not _opens(ms):
+            raise RuntimeError(
+                f"{ms} does not open, even with the storage-manager headers saved before the interrupted "
+                f"flag write put back. The journal at {path} holds those headers (headers/) and the files "
+                "as they were found (found/)."
+            )
+
+    table = arcae.table(ms, readonly=False)
+    try:
+        headers, files = _storage_files(ms, table)
+        _put_cells(table, edit, on=False)
+    finally:
+        table.close()
+    for name in files:
+        _fsync(os.path.join(ms, name))
+    _fsync(ms)
+    _clear_journal(ms)
+    done = f"rolled back an interrupted flag edit ({meta['description']})"
+    return done + (f"; restored {', '.join(restored)}, which the interruption had broken" if restored else "")
+
+
+# Flaggers with a write possibly in flight, waited for at interpreter exit.
+_LIVE: "weakref.WeakSet[Flagger]" = weakref.WeakSet()
+
+
+@atexit.register
+def _wait_for_writes() -> None:
+    """Let a write that is in progress finish before the process exits.
+
+    FastAPI runs the write in a worker thread, which Ctrl-C does not
+    interrupt, but which would die with the interpreter. atexit handlers run
+    while such daemon threads are still alive.
+    """
+    for flagger in list(_LIVE):
+        if flagger._lock.acquire(timeout=120):
+            flagger._lock.release()
 
 
 def _runs(values: np.ndarray) -> list[tuple[int, int]]:
@@ -164,7 +422,7 @@ class Edit:
     description: str
 
 
-@dataclass
+@dataclass(eq=False)  # compared and hashed by identity: one per server
 class Flagger:
     """Applies and undoes flag edits on one Measurement Set, for one server session.
 
@@ -187,6 +445,19 @@ class Flagger:
     _backup_done: threading.Event = field(default_factory=threading.Event)
     _backup_thread: threading.Thread | None = None
     _next_id: int = 1
+    # Set when a write failed and could not be put back; writes are refused.
+    broken: str | None = None
+    # What recover() did at startup, if anything.
+    recovered: str | None = None
+
+    def __post_init__(self) -> None:
+        _LIVE.add(self)
+
+    def recover(self) -> str | None:
+        """Roll back a write a previous session was killed in the middle of; see :func:`recover`."""
+        with self._lock:
+            self.recovered = recover(self.ms)
+            return self.recovered
 
     @property
     def backup_state(self) -> str:
@@ -286,59 +557,98 @@ class Flagger:
 
             import arcae
 
-            # Nothing cached holds FLAG, so the write needs no re-open (see msdata.writing).
-            with nullcontext() if dry_run else msdata.writing(self.ms):
-                table = arcae.table(self.ms, readonly=dry_run)
-                try:
-                    flag = np.asarray(table.getcol("FLAG", index=(rows,)), dtype=bool)
-                    flag_row = np.asarray(table.getcol("FLAG_ROW", index=(rows,)), dtype=bool)
-                    # (row, channel) cells to set, broadcast over the chosen correlations.
-                    cells = np.zeros(flag.shape, dtype=bool)
-                    cells[..., corr_idx] = mask[slot][..., None]
-                    if flipped.any():
-                        # corr_idx is in the waterfall's order; a reversed row stores
-                        # the cross-hands the other way round.
-                        labels = [str(p) for p in ds.polarization.values]
-                        cells[flipped] = cells[flipped][..., msdata.reversed_correlations(labels)]
-                    already = flag | flag_row[:, None, None]
-                    summary = {
-                        "cells": int(cells.sum()),
-                        "newly_flagged": int((cells & ~already).sum()),
-                        "backup": self.backup,
-                    }
-                    if dry_run:
-                        return {"id": None, **summary}
+            table = arcae.table(self.ms)
+            try:
+                flag = np.asarray(table.getcol("FLAG", index=(rows,)), dtype=bool)
+                flag_row = np.asarray(table.getcol("FLAG_ROW", index=(rows,)), dtype=bool)
+            finally:
+                table.close()
+            # (row, channel) cells to set, broadcast over the chosen correlations.
+            cells = np.zeros(flag.shape, dtype=bool)
+            cells[..., corr_idx] = mask[slot][..., None]
+            if flipped.any():
+                # corr_idx is in the waterfall's order; a reversed row stores
+                # the cross-hands the other way round.
+                labels = [str(p) for p in ds.polarization.values]
+                cells[flipped] = cells[flipped][..., msdata.reversed_correlations(labels)]
+            already = flag | flag_row[:, None, None]
+            summary = {
+                "cells": int(cells.sum()),
+                "newly_flagged": int((cells & ~already).sum()),
+                "backup": self.backup,
+            }
+            if dry_run:
+                return {"id": None, **summary}
 
-                    changed = cells & ~flag
-                    new = flag | changed
-                    # Only ever set: a row flagged through FLAG_ROW alone stays flagged.
-                    new_row = flag_row | new.all(axis=(1, 2))
-                    edit = Edit(
-                        id=self._next_id,
-                        rows=rows,
-                        corr_idx=list(corr_idx),
-                        changed=tuple(i.astype(np.int32) for i in np.nonzero(changed)),
-                        row_set=np.flatnonzero(new_row & ~flag_row),
-                        cells=summary["cells"],
-                        newly_flagged=summary["newly_flagged"],
-                        description=f"{name1}-{name2} field {field_id} spw {spw} scan {scan}",
-                    )
-                    try:
-                        table.putcol("FLAG", new, index=(rows,))
-                        table.putcol("FLAG_ROW", new_row, index=(rows,))
-                    except Exception:
-                        # Put back what this edit wrote, so a half-written edit is not left behind unrecorded.
-                        try:
-                            table.putcol("FLAG", flag, index=(rows,))
-                            table.putcol("FLAG_ROW", flag_row, index=(rows,))
-                        except Exception:  # noqa: BLE001 - keep the edit so undo can still try
-                            self._record(edit)
-                        raise
-                finally:
-                    table.close()
-
+            changed = cells & ~flag
+            # Only ever set: a row flagged through FLAG_ROW alone stays flagged.
+            new_row = flag_row | (flag | changed).all(axis=(1, 2))
+            edit = Edit(
+                id=self._next_id,
+                rows=rows,
+                corr_idx=list(corr_idx),
+                changed=tuple(i.astype(np.int32) for i in np.nonzero(changed)),
+                row_set=np.flatnonzero(new_row & ~flag_row),
+                cells=summary["cells"],
+                newly_flagged=summary["newly_flagged"],
+                description=f"{name1}-{name2} field {field_id} spw {spw} scan {scan}",
+            )
+            self._write(edit, on=True)
             self._record(edit)
             return {"id": edit.id, **summary}
+
+    def _write(self, edit: Edit, on: bool) -> None:
+        """Set or clear an edit's cells, journalled; on failure, put the MS back as it was before the edit.
+
+        The journal is on disk before the first byte of the MS changes and is
+        retired only once the storage managers' files are fsynced, so from a
+        crash anywhere in between :func:`recover` restores a broken header and
+        rolls the edit back.
+
+        Raises:
+            RuntimeError: if an earlier failure could not be put back.
+        """
+        import arcae
+
+        from surfvis.web import msdata
+
+        if self.broken is not None:
+            raise RuntimeError(self.broken)
+        # Nothing cached holds FLAG, so the write needs no re-open (see msdata.writing).
+        with msdata.writing(self.ms):
+            table = arcae.table(self.ms, readonly=False)
+            try:
+                headers, files = _storage_files(self.ms, table)
+                _write_journal(self.ms, edit, headers)
+            except BaseException:
+                table.close()
+                raise
+            try:
+                try:
+                    _put_cells(table, edit, on)
+                finally:
+                    table.close()
+                for name in files:
+                    _fsync(os.path.join(self.ms, name))
+                _fsync(self.ms)
+                _clear_journal(self.ms)
+            except BaseException as exc:
+                self._put_back(exc)
+                if self.broken is None:
+                    exc.rolled_back = True  # the edit's cells are clear
+                raise
+
+    def _put_back(self, exc: BaseException) -> None:
+        """Recover from a failed write in place; if that fails too, refuse further writes."""
+        try:
+            recover(self.ms)
+        except Exception as again:  # noqa: BLE001 - reported, and writes stop
+            self.broken = (
+                f"A flag write failed ({type(exc).__name__}: {exc}) and putting it back failed too "
+                f"({type(again).__name__}: {again}). Flagging is disabled; restart surfvis serve with "
+                f"--allow-flagging to roll it back from {journal_path(self.ms)}."
+            )
+            print(f"surfvis: {self.broken}", file=sys.stderr, flush=True)
 
     def _record(self, edit: Edit) -> None:
         self._next_id += 1
@@ -351,25 +661,16 @@ class Flagger:
         flags written since by anything else survive. FLAG_ROW is recomputed
         only for rows this edit flagged.
         """
-        import arcae
-
-        from surfvis.web import msdata
-
         with self._lock:
             if not self.edits:
                 return None
             edit = self.edits[-1]
-            with msdata.writing(self.ms):
-                table = arcae.table(self.ms, readonly=False)
-                try:
-                    flag = np.array(table.getcol("FLAG", index=(edit.rows,)), dtype=bool)
-                    flag[edit.changed] = False
-                    table.putcol("FLAG", flag, index=(edit.rows,))
-                    if edit.row_set.size:
-                        flag_row = np.array(table.getcol("FLAG_ROW", index=(edit.rows,)), dtype=bool)
-                        flag_row[edit.row_set] = flag[edit.row_set].all(axis=(1, 2))
-                        table.putcol("FLAG_ROW", flag_row, index=(edit.rows,))
-                finally:
-                    table.close()
+            try:
+                self._write(edit, on=False)
+            except Exception as exc:
+                # Putting a failed undo back clears the edit's cells, which is the undo.
+                if getattr(exc, "rolled_back", False):
+                    self.edits.pop()
+                raise
             self.edits.pop()
             return edit

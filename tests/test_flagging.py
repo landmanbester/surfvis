@@ -4,6 +4,7 @@ Needs a Measurement Set, and works on a copy so the session fixtures stay
 pristine. Which cells a polygon covers is tested in ``test_rasterise.py``.
 """
 
+import os
 import shutil
 
 import pytest
@@ -312,9 +313,10 @@ def test_undo_keeps_flags_written_since(chi2_zarr, writable_ms):
 
 @needs_web
 def test_a_failed_write_is_put_back(chi2_zarr, writable_ms, monkeypatch):
-    """If FLAG_ROW cannot be written after FLAG was, FLAG is restored rather than left half-edited."""
+    """A write that raises after FLAG went to disk is rolled back, and flagging carries on."""
     import arcae
 
+    from surfvis.web import flagging
     from surfvis.web.flagging import Flagger
 
     names = chi2_zarr["ms"]["antenna_names"]
@@ -322,6 +324,8 @@ def test_a_failed_write_is_put_back(chi2_zarr, writable_ms, monkeypatch):
     real = arcae.table
 
     class Failing:
+        failed = False
+
         def __init__(self, t):
             self._t = t
 
@@ -329,14 +333,13 @@ def test_a_failed_write_is_put_back(chi2_zarr, writable_ms, monkeypatch):
             return getattr(self._t, name)
 
         def putcol(self, column, *args, **kwargs):
-            if column == "FLAG_ROW" and not getattr(self, "_restoring", False):
-                self._restoring = True
+            out = self._t.putcol(column, *args, **kwargs)
+            if column == "FLAG" and not Failing.failed:
+                Failing.failed = True
                 raise OSError("disk full")
-            return self._t.putcol(column, *args, **kwargs)
+            return out
 
-    flagger = Flagger(writable_ms)
-    flagger.backup, flagger._backup_done = "pretend", __import__("threading").Event()
-    flagger._backup_done.set()
+    flagger = _ready(Flagger(writable_ms))
     monkeypatch.setattr(
         arcae, "table", lambda *a, **k: Failing(real(*a, **k)) if k.get("readonly") is False else real(*a, **k)
     )
@@ -347,7 +350,142 @@ def test_a_failed_write_is_put_back(chi2_zarr, writable_ms, monkeypatch):
     after, after_row = _flags(writable_ms)
     np.testing.assert_array_equal(after, before)
     np.testing.assert_array_equal(after_row, before_row)
-    assert flagger.edits == []
+    assert flagger.edits == [] and flagger.broken is None
+    assert flagging.journal_path(writable_ms) is None
+    flagger.apply(0, 0, 1, names[0], names[2], np.array(_rect(1, 2, 0, 3)), corr_idx=[0])
+    assert _flags(writable_ms)[0][_baseline_rows(writable_ms, 0, 2, scan=1)[1:3], 0:4, 0].all()
+
+
+def _ready(flagger):
+    """A Flagger whose backup counts as taken, for tests about writes."""
+    flagger.backup = "pretend"
+    flagger._backup_done.set()
+    return flagger
+
+
+# Run in a child process: flag through Flagger, but die inside the FLAG write
+# the way a kill -9 lands between casacore truncating the tiled storage
+# manager's header and writing it again -- the header left empty, nothing
+# closed or fsynced.
+_KILLED_MID_WRITE = """
+import os, sys
+import numpy as np
+import arcae
+from surfvis.web import flagging
+from surfvis.web.flagging import Flagger
+
+ms, header, p, q = sys.argv[1], sys.argv[2], sys.argv[3], sys.argv[4]
+real = arcae.table
+
+
+class Dies:
+    def __init__(self, t):
+        self._t = t
+
+    def __getattr__(self, name):
+        return getattr(self._t, name)
+
+    def putcol(self, column, *args, **kwargs):
+        self._t.putcol(column, *args, **kwargs)
+        if column == "FLAG":
+            os.truncate(os.path.join(ms, header), 0)
+            os._exit(9)
+
+
+arcae.table = lambda *a, **k: Dies(real(*a, **k)) if k.get("readonly") is False else real(*a, **k)
+f = Flagger(ms)
+f.backup = "pretend"
+f._backup_done.set()
+rect = [(0.5, -0.5), (0.5, 9.5), (3.5, 9.5), (3.5, -0.5)]  # slots 1-3, channels 0-9
+f.apply(0, 0, 1, p, q, np.array(rect), corr_idx=[0, 1, 2, 3])
+"""
+
+
+@needs_web
+def test_a_write_killed_half_way_cannot_brick_the_ms(chi2_zarr, tmp_path):
+    """serve --allow-flagging after a kill mid-write: the MS opens again and the edit is rolled back.
+
+    casacore truncates and rewrites a TiledShapeStMan's header on every flush
+    and fsyncs neither it nor the tiles. Killed in between, the MS would not
+    open at all; the journal holds a copy of the header and the edit.
+    """
+    import subprocess
+    import sys
+    from pathlib import Path
+
+    pytest.importorskip("httpx2")
+    from casacore.tables import table
+    from fastapi.testclient import TestClient
+
+    from surfvis.web import flagging
+    from surfvis.web.app import create_app
+    from tests.fixtures.ms import copy_with_tiled_flags
+
+    ms = copy_with_tiled_flags(chi2_zarr["ms"]["path"], str(tmp_path / "killed.ms"))
+    with table(ms, ack=False) as t:
+        header = f"table.f{t.getdminfo('FLAG')['SEQNR']}"
+    assert os.path.exists(os.path.join(ms, header + "_TSM1")), "FLAG is in a tiled storage manager"
+    before, before_row = _flags(ms)
+    names = chi2_zarr["ms"]["antenna_names"]
+
+    root = str(Path(__file__).resolve().parents[1])
+    env = {
+        **os.environ,
+        "PYTHONPATH": os.pathsep.join([str(Path(root) / "src"), root, os.environ.get("PYTHONPATH", "")]),
+    }
+    child = subprocess.run([sys.executable, "-c", _KILLED_MID_WRITE, ms, header, names[0], names[2]], env=env)
+    assert child.returncode == 9
+    assert os.path.getsize(os.path.join(ms, header)) == 0
+    assert not flagging._opens(ms), "the emulated kill should have bricked the MS"
+    assert flagging.journal_path(ms) is not None
+
+    readonly = TestClient(create_app(chi2_zarr["zarr"], ms=ms))
+    assert readonly.get("/flag/state").json() == {"enabled": False}
+    assert flagging.journal_path(ms) is not None, "recovery is only done with --allow-flagging"
+
+    client = TestClient(create_app(chi2_zarr["zarr"], ms=ms, allow_flagging=True))
+    state = _wait_for_backup(client)
+    assert "rolled back" in state["recovered"] and header in state["recovered"]
+    assert flagging._opens(ms) and flagging.journal_path(ms) is None
+    after, after_row = _flags(ms)
+    np.testing.assert_array_equal(after, before)
+    np.testing.assert_array_equal(after_row, before_row)
+    # The backup was taken after the rollback, and flagging works.
+    assert state["backup_state"] == "done" and state["broken"] is None
+    body = {"field": 0, "spw": 0, "scan": 1, "p": 0, "q": 2, "product": "XX", "vertices": _rect(1, 2, 4, 9)}
+    assert client.post("/flag", json=body).status_code == 200
+    assert flagging.recover(ms) is None
+
+
+@needs_web
+def test_recovery_is_idempotent_and_leaves_newer_flags(chi2_zarr, writable_ms):
+    """A journal is cleared by clearing its cells: rerunning it, or flags set elsewhere since, are safe."""
+    from casacore.tables import table
+
+    from surfvis.web import flagging
+    from surfvis.web.flagging import Edit, _write_journal
+
+    rows = _baseline_rows(writable_ms, 0, 2, scan=1)[:2]
+    edit = Edit(
+        id=1,
+        rows=rows.astype(np.int64),
+        corr_idx=[0],
+        changed=(np.array([0, 1], np.int32), np.array([5, 5], np.int32), np.array([0, 0], np.int32)),
+        row_set=np.array([], np.int64),
+        cells=2,
+        newly_flagged=2,
+        description="by hand",
+    )
+    with table(writable_ms, readonly=False, ack=False) as t:
+        flag = t.getcol("FLAG")
+        flag[rows, 5, 0] = True  # what the interrupted edit wrote
+        flag[rows, 6, 1] = True  # what someone else wrote
+        t.putcol("FLAG", flag)
+    for _ in range(2):
+        _write_journal(writable_ms, edit, [])
+        assert "by hand" in flagging.recover(writable_ms)
+        after, _ = _flags(writable_ms)
+        assert not after[rows, 5, 0].any() and after[rows, 6, 1].all()
 
 
 @needs_web
