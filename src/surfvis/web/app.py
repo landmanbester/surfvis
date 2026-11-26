@@ -353,6 +353,18 @@ def create_app(
                 "keep": keep,
                 "differs": bool(keep - {"quantity"}),
                 "problems": problems,
+                # What a selection drawn on this panel is posted with (see /flag).
+                "flagging": flagger is not None,
+                "flag_context": {
+                    "field": field,
+                    "spw": spw,
+                    "scan": scan,
+                    "p": p,
+                    "q": q,
+                    "product": settings["product"],
+                    "gtable": settings["gtable"],
+                    "flagversion": settings["flagversion"],
+                },
             },
         )
 
@@ -525,7 +537,7 @@ def create_app(
                 corr_idx = list(range(len(labels)))
             else:
                 corr_idx = msdata.product_correlations(ms_path, req.field, req.spw, req.scan, req.product, gtable)
-            return flagger_.apply(
+            result = flagger_.apply(
                 req.field,
                 req.spw,
                 req.scan,
@@ -535,6 +547,7 @@ def create_app(
                 corr_idx,
                 dry_run=req.dry_run,
             )
+            return {**result, "correlations": [labels[i] for i in corr_idx]}
         except BackupPendingError as exc:
             raise HTTPException(status_code=503, detail=str(exc), headers={"Retry-After": "10"}) from exc
         except (KeyError, IndexError, FileNotFoundError) as exc:

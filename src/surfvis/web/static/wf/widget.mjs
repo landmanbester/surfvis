@@ -1,8 +1,8 @@
 // The waterfall drawn in the browser. Fetches blocks from /waterfall.bin,
 // paints them on a canvas, zooms (wheel) and pans (shift- or middle-drag),
 // and reports what is under the cursor. Plain left-drag, click and
-// double-click are deliberately unbound: step 3 of #16 uses them to draw
-// flagging polygons, through toData/toScreen/addLayer.
+// double-click are left to flagtool.mjs, which draws selections through
+// toData/toScreen/addLayer when serve runs with --allow-flagging.
 
 import { decode } from "./format.mjs";
 import { LUTS } from "./luts.mjs";
@@ -243,6 +243,33 @@ export async function mount(root) {
       draw();
     },
     redraw: () => draw(),
+    // Whether a canvas point (CSS pixels) is on the plot, not in its margins.
+    inPlot(x, y) {
+      const r = rect();
+      return x >= r.x && x <= r.x + r.w && y >= r.y && y <= r.y + r.h;
+    },
+    // The visible window, in data coordinates, for clipping overlays.
+    get window() {
+      return view ? { ...view.win } : null;
+    },
+    // Re-fetch what is on screen (after a flag edit), keeping the view.
+    async reload() {
+      if (!view) return;
+      const req = view.request(rect(), window.devicePixelRatio || 1);
+      plot.classList.add("refining");
+      const seq = ++refineSeq;
+      try {
+        const decoded = await fetchBlock(req);
+        if (decoded) {
+          blockReq = req;
+          setBlock(decoded);
+          draw();
+        }
+      } finally {
+        if (seq === refineSeq) plot.classList.remove("refining");
+      }
+    },
+    life: life.signal,
     get view() {
       return view;
     },
@@ -352,6 +379,10 @@ export async function mount(root) {
     return api;
   }
   root.waterfall = api;
+  if (root.dataset.flag) {
+    const tool = await import(new URL(`./flagtool.mjs${new URL(import.meta.url).search}`, import.meta.url));
+    if (root.isConnected) tool.attach(root, api);
+  }
   root.dispatchEvent(new CustomEvent("wf:ready", { bubbles: true, detail: api }));
   return api;
 }

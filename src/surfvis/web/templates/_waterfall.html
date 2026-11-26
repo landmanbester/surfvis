@@ -74,16 +74,26 @@
   </ul>
   {% else %}
   <div class="wf" data-src="/waterfall.bin?{{ query }}"
-       data-module="/static/wf/widget.mjs?v={{ static_version }}">
+       data-module="/static/wf/widget.mjs?v={{ static_version }}"
+       {% if flagging %}data-flag="{{ flag_context|tojson|forceescape }}" data-names="{{ [name1, name2]|tojson|forceescape }}"{% endif %}>
     <div class="wf-bar">
       <span class="wf-title"></span>
       <label class="wf-check"><input type="checkbox" class="wf-flags" checked> show flags</label>
       <button type="button" class="wf-reset">Reset view</button>
     </div>
+    {% if flagging %}
+    <div class="wf-bar wf-flagbar">
+      <label class="wf-check" title="Flag every correlation of the baseline, not only those the plotted product is formed from">
+        <input type="checkbox" class="wf-allcorr" checked> all correlations</label>
+      <button type="button" class="wf-apply wf-button" hidden></button>
+      <button type="button" class="wf-undo wf-button" hidden></button>
+      <span class="wf-flagstatus" aria-live="polite"></span>
+    </div>
+    {% endif %}
     <div class="plot loading" data-label="Reading visibilities&hellip;">
       <canvas class="wf-canvas" aria-label="Waterfall for baseline {{ name1 }} to {{ name2 }}"></canvas>
     </div>
-    <p class="axis wf-readout">wheel: zoom &middot; shift-drag or middle-drag: pan &middot; 0: reset</p>
+    <p class="axis wf-readout">wheel: zoom &middot; shift-drag or middle-drag: pan &middot; 0: reset{% if flagging %} &middot; drag: rectangle &middot; click: polygon &middot; Enter: close, then flag &middot; Esc: cancel &middot; Ctrl-Z: undo{% endif %}</p>
   </div>
   {% endif %}
 </div>

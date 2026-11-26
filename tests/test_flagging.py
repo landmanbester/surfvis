@@ -322,6 +322,40 @@ def test_an_unset_gtable_means_the_one_chi2_used(chi2_zarr, tmp_path):
 
 
 @needs_web
+def test_the_panel_offers_flagging_only_when_allowed(chi2_zarr, writable_ms):
+    """The selection tool is wired up from the panel's data-flag, which carries what /flag needs."""
+    import html
+    import json
+    import re
+
+    pytest.importorskip("httpx2")
+    from fastapi.testclient import TestClient
+
+    from surfvis.web.app import create_app
+
+    url = "/waterfall?field=0&spw=0&scan=1&c=XX&p=2&q=0&column=RESIDUAL"
+    readonly = TestClient(create_app(chi2_zarr["zarr"], ms=writable_ms)).get(url).text
+    assert "data-flag" not in readonly and "wf-apply" not in readonly and "Ctrl-Z" not in readonly
+
+    client = TestClient(create_app(chi2_zarr["zarr"], ms=writable_ms, allow_flagging=True))
+    panel = client.get(url + "&flagversion=").text
+    ctx = json.loads(html.unescape(re.search(r'data-flag="([^"]*)"', panel).group(1)))
+    assert ctx == {"field": 0, "spw": 0, "scan": 1, "p": 2, "q": 0, "product": "XX", "gtable": "", "flagversion": ""}
+    names = json.loads(html.unescape(re.search(r'data-names="([^"]*)"', panel).group(1)))
+    assert sorted(names) == sorted(chi2_zarr["ms"]["antenna_names"][i] for i in (0, 2))
+    assert 'class="wf-allcorr" checked' in panel and "wf-apply" in panel and "wf-undo" in panel
+
+    # What the page posts comes back with the correlations it covers, for the confirm label.
+    _wait_for_backup(client)
+    dry = client.post("/flag", json={**ctx, "vertices": _rect(1, 2, 4, 9), "dry_run": True}).json()
+    assert dry["correlations"] == ["XX", "XY", "YX", "YY"]
+    product = client.post(
+        "/flag", json={**ctx, "vertices": _rect(1, 2, 4, 9), "correlations": "product", "dry_run": True}
+    )
+    assert product.json()["correlations"] == ["XX"]
+
+
+@needs_web
 def test_backup_of_a_tiled_flag_column(chi2_zarr, tmp_path):
     """A real MS keeps FLAG in a TiledShapeStMan; the backup must copy it, shape intact."""
     from casacore.tables import table
