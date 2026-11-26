@@ -5,12 +5,17 @@ xarray-ms presents an MSv2 table as an MSv4 view: variables are shaped
 waterfall shape, so no row-to-grid pivot is needed.
 
 MSv4 renames the columns you are used to -- ``DATA`` is exposed as
-``VISIBILITY``, ``WEIGHT_SPECTRUM`` as ``WEIGHT``. Rather than hardcode that,
-the names are resolved through the dataset's ``data_groups`` attribute, the
-same mechanism pfb-imaging uses (see ``pfb_imaging/core/imager.py``). Columns
-that are *not* part of the MSv2 standard -- ``RESIDUAL``, say -- are surfaced
-verbatim as secondary variables, which is what makes the residual column
-surfchi2 works on plottable.
+``VISIBILITY``, ``CORRECTED_DATA`` as ``VISIBILITY_CORRECTED``, ``MODEL_DATA``
+as ``VISIBILITY_MODEL`` and ``WEIGHT_SPECTRUM`` as ``WEIGHT``; see
+:class:`DataGroup`. Columns that are *not* part of the MSv2 standard --
+``RESIDUAL``, say -- are surfaced verbatim as secondary variables, which is
+what makes the residual column surfchi2 works on plottable.
+
+Baselines are presented upper-triangular: a row stored as ``ANTENNA1 >
+ANTENNA2`` is converted on read to the baseline ``(ANTENNA2, ANTENNA1)``,
+conjugated with its cross-hands swapped. Everything here therefore follows
+xarray-ms's ``baseline_antenna1/2_name``, and only code that touches MS rows
+directly (flag versions, flag writes) needs to know a row was reversed.
 """
 
 import os
@@ -81,6 +86,18 @@ _OPENING = _Coalescer()
 _SCANNING = _Coalescer()
 
 
+# The MSv2 columns xarray-ms presents under another name: the correlated data
+# of its standard ``base``, ``corrected`` and ``model`` data groups, and the
+# weight and flag they share.
+_MSV4_NAMES = {
+    "DATA": "VISIBILITY",
+    "CORRECTED_DATA": "VISIBILITY_CORRECTED",
+    "MODEL_DATA": "VISIBILITY_MODEL",
+    "WEIGHT_SPECTRUM": "WEIGHT",
+    "FLAG": "FLAG",
+}
+
+
 @dataclass(frozen=True)
 class DataGroup:
     """The MSv4 variable names behind the MSv2 columns people ask for."""
@@ -92,18 +109,17 @@ class DataGroup:
     def resolve(self, column: str) -> str:
         """Translate an MSv2 column name to the MSv4 variable that holds it.
 
-        Only the columns the data group actually maps are translated. Everything
-        else passes through: non-standard columns (``RESIDUAL``) and the
-        standard ones xarray-ms keeps as secondary variables
-        (``CORRECTED_DATA``, ``MODEL_DATA``) appear under their own names.
-        Mapping ``CORRECTED_DATA`` to the group's ``VISIBILITY`` would silently
-        plot ``DATA`` instead.
+        ``CORRECTED_DATA`` is ``VISIBILITY_CORRECTED``, not the group's
+        ``VISIBILITY``: mapping it there would silently plot ``DATA``.
+        Non-standard columns (``RESIDUAL``) and MSv4 names pass through.
         """
-        return {
-            "DATA": self.correlated_data,
-            "WEIGHT_SPECTRUM": self.weight,
-            "FLAG": self.flag,
-        }.get(column, column)
+        if column == "DATA":
+            return self.correlated_data
+        if column == "WEIGHT_SPECTRUM":
+            return self.weight
+        if column == "FLAG":
+            return self.flag
+        return _MSV4_NAMES.get(column, column)
 
 
 @dataclass(frozen=True)
@@ -132,23 +148,26 @@ class Waterfall:
     limits: dict = field(default_factory=dict, compare=False, repr=False)
 
 
-# The one data group xarray-ms's MSv2 backend defines. It is a constant
-# (``MSv2EntryPoint.postprocess_datasets`` writes it into the datatree's
-# ``data_groups``), so nothing is opened to learn it.
-_MSV2_GROUPS = {"base": DataGroup(correlated_data="VISIBILITY", weight="WEIGHT", flag="FLAG")}
+# xarray-ms's standard data groups. They are constants (``corrected`` and
+# ``model`` exist when their MSv2 column does), so nothing is opened to learn
+# them.
+_MSV2_GROUPS = {
+    "base": DataGroup(correlated_data="VISIBILITY", weight="WEIGHT", flag="FLAG"),
+    "corrected": DataGroup(correlated_data="VISIBILITY_CORRECTED", weight="WEIGHT", flag="FLAG"),
+    "model": DataGroup(correlated_data="VISIBILITY_MODEL", weight="WEIGHT", flag="FLAG"),
+}
 
 
 def data_group(ms: str, group: str = "base") -> DataGroup:
     """Resolve the MSv4 data group for an MS.
 
     Not read from ``open_datatree``'s ``data_groups``: that opens every
-    partition, and xarray-ms scans the row shapes of every extra column in
-    each, which on a large MS took over ten minutes, for a value the backend
-    hard-codes. ``ms`` is kept so callers need not change if that stops being
-    true.
+    partition, which on a large MS took over ten minutes, for values the
+    backend hard-codes. ``ms`` is kept so callers need not change if that
+    stops being true.
 
     Raises:
-        KeyError: for a group other than ``base``.
+        KeyError: for a group that is not one of xarray-ms's standard ones.
     """
     if group not in _MSV2_GROUPS:
         raise KeyError(f"No data group {group!r} in {ms}. Have: {sorted(_MSV2_GROUPS)}")
@@ -168,6 +187,36 @@ def _open_partition(ms: str, field: int, spw: int, scan: int, fingerprint: tuple
         engine="xarray-ms:msv2",
         partition_schema=list(PARTITION_SCHEMA),
         partition_key=(("FIELD_ID", field), ("DATA_DESC_ID", spw), ("SCAN_NUMBER", scan)),
+        baseline_orientation=dict(_orientations(ms, _layout_stamp(ms))),
+    )
+
+
+@lru_cache(maxsize=8)
+def _orientations(ms: str, stamp: tuple) -> tuple[tuple[str, str], ...]:
+    """Declare every non-standard ``(channel, correlation)`` column Hermitian.
+
+    xarray-ms cannot tell how a column it does not know transforms when its
+    baseline is reversed, so without this it drops ``RESIDUAL`` and the like
+    from any partition holding a row stored as ``ANTENNA1 > ANTENNA2``. A
+    two-dimensional column here is a visibility, weight or flag per channel
+    and correlation, all of which are Hermitian (complex values conjugated,
+    cross-hands swapped). ``stamp`` only keys the cache.
+    """
+    import arcae
+    from arcae.lib.arrow_tables import ms_descriptor
+
+    standard = set(ms_descriptor("MAIN", complete=True))
+    table = arcae.table(ms)
+    try:
+        desc = table.tabledesc()
+    finally:
+        table.close()
+    return tuple(
+        sorted(
+            (name, "hermitian")
+            for name, col in desc.items()
+            if name not in standard and isinstance(col, dict) and col.get("ndim") == 2
+        )
     )
 
 
@@ -414,37 +463,61 @@ def scan_rows(ms: str, field: int, spw: int, scan: int) -> ScanRows:
 
 
 @timed("baseline_rows")
-def baseline_rows(ms: str, field: int, spw: int, scan: int, name1: str, name2: str) -> tuple[np.ndarray, np.ndarray]:
-    """Main-table row numbers and TIME values (MJD seconds) of one baseline in one partition.
+def baseline_rows(
+    ms: str, field: int, spw: int, scan: int, name1: str, name2: str
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """Main-table rows of one baseline in one partition, stored either way round.
 
-    Only the given antenna order matches: pass the order the MS stores the
-    baseline in, as the waterfall shows it. A baseline stored both ways in one
-    partition is two baselines to xarray-ms, and flagging one must not touch
-    the other. Selected from :func:`scan_rows`, so a query over the main table
-    runs once per scan rather than per baseline (on a 10 M-row MS each query
-    took 7 s). The row array is a writable copy: arcae rejects read-only
-    buffers as row indices.
+    Pass the baseline as xarray-ms presents it (:func:`view_order`). Rows
+    stored as ``(name2, name1)`` are what xarray-ms converts on read, and are
+    marked ``reversed``: their cross-hand correlations are swapped relative
+    to the waterfall (:func:`reversed_correlations`).
+
+    Selected from :func:`scan_rows`, so a query over the main table runs once
+    per scan rather than per baseline (on a 10 M-row MS each query took 7 s).
+
+    Returns:
+        Row numbers (a writable copy: arcae rejects read-only buffers as row
+        indices), their TIME values in MJD seconds, and whether each row is
+        stored reversed.
     """
     ids = _antenna_ids(ms, _layout_stamp(ms))
     a, b = ids[name1], ids[name2]
     scan_ = scan_rows(ms, field, spw, scan)
-    hit = (scan_.antenna1 == a) & (scan_.antenna2 == b)
-    return scan_.rows[hit].copy(), scan_.times[hit]
+    forward = (scan_.antenna1 == a) & (scan_.antenna2 == b)
+    backward = (scan_.antenna1 == b) & (scan_.antenna2 == a) & (a != b)
+    hit = forward | backward
+    return scan_.rows[hit].copy(), scan_.times[hit], backward[hit]
 
 
-def stored_order(ms: str, field: int, spw: int, scan: int, name1: str, name2: str) -> tuple[str, str]:
-    """The baseline's antenna order as the MS stores it, which is the order its data is in.
+def view_order(ds: xarray.Dataset, name1: str, name2: str) -> tuple[str, str]:
+    """A baseline's antennas in the order xarray-ms presents it, which is the order its data is in.
 
-    Not xarray-ms's ``baseline_antenna1/2_name``: a baseline stored as (2, 0)
-    is labelled (0, 2) there while its data stays V_20, unconjugated. Gains,
-    cross-hand labels and flag rows must follow the data, so ask the MS. The
-    requested order wins if the MS holds both.
+    The heatmap is symmetric, so a click can ask for ``(q, p)``. xarray-ms
+    presents every baseline upper-triangular, converting rows stored the
+    other way round, so gains, cross-hand labels and the title follow its
+    labels rather than the order asked for or the order the MS stores.
     """
-    if baseline_rows(ms, field, spw, scan, name1, name2)[0].size:
-        return name1, name2
-    if baseline_rows(ms, field, spw, scan, name2, name1)[0].size:
-        return name2, name1
-    raise KeyError(f"No baseline {name1}-{name2} in field {field}, spw {spw}, scan {scan}")
+    k = baseline_index(ds, name1, name2)
+    return str(ds.baseline_antenna1_name.values[k]), str(ds.baseline_antenna2_name.values[k])
+
+
+# Each cross-hand's partner on the reversed baseline: V_qp = V_pq^H.
+_PARTNER = {"XY": "YX", "YX": "XY", "RL": "LR", "LR": "RL"}
+
+
+def reversed_correlations(labels: list[str]) -> np.ndarray:
+    """Correlation permutation between a reversed row and the baseline as presented.
+
+    Its own inverse, so it maps either way.
+
+    Raises:
+        ValueError: if a cross-hand is present without its partner.
+    """
+    try:
+        return np.array([labels.index(_PARTNER.get(c, c)) for c in labels])
+    except ValueError:
+        raise ValueError(f"Correlations {labels} have a cross-hand without its partner") from None
 
 
 def slot_index(grid: np.ndarray, times: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
@@ -529,28 +602,33 @@ def _version_flags(
     name2: str,
     grid: np.ndarray,
     corr_idx: list[int],
+    labels: list[str],
 ) -> np.ndarray:
     """One baseline's flags from a saved flag version, on the partition's time grid.
 
     The version tables are row-aligned with the main table, so the baseline's
     rows are found in the main table and the same row numbers read from the
-    version. Rows the grid has but the MS does not are flagged, as they are
-    for the live FLAG column. Read with arcae, the same library xarray-ms uses,
-    so the web layer needs no python-casacore.
+    version. Rows stored reversed have their cross-hands swapped, as
+    xarray-ms does for the live FLAG. Rows the grid has but the MS does not
+    are flagged, as they are for the live FLAG column. Read with arcae, the
+    same library xarray-ms uses, so the web layer needs no python-casacore.
     """
     import arcae
 
     if version not in flag_versions(ms):
         raise KeyError(f"No flag version {version!r} for {ms}. Have: {flag_versions(ms)}")
 
-    rows, times = baseline_rows(ms, field, spw, scan, name1, name2)
+    rows, times, flipped = baseline_rows(ms, field, spw, scan, name1, name2)
 
     nchan = None
     if rows.size:
         vt = arcae.table(f"{ms.rstrip('/')}.flagversions/flags.{version}")
         try:
             # arcae returns boolean columns as uint8.
-            flags = np.array(vt.getcol("FLAG", index=(rows,))[..., corr_idx], dtype=bool)
+            flags = np.array(vt.getcol("FLAG", index=(rows,)), dtype=bool)
+            if flipped.any():
+                flags[flipped] = flags[flipped][..., reversed_correlations(labels)]
+            flags = flags[..., corr_idx]
             flags |= np.asarray(vt.getcol("FLAG_ROW", index=(rows,)), dtype=bool)[:, None, None]
             nchan = flags.shape[1]
         finally:
@@ -675,11 +753,10 @@ def waterfall(
         if name is not None and name not in ds.data_vars:
             raise KeyError(f"Column {name!r} not in this Measurement Set. Have: {sorted(ds.data_vars)}")
 
-    # Plot the baseline the way the MS stores it. The grid is symmetric, so a
-    # click can ask for (q, p); the data read is in the stored order, and
-    # gains, cross-hand labels and the title must all follow it.
+    # The grid is symmetric, so a click can ask for (q, p); the data is in
+    # xarray-ms's order, and gains, cross-hand labels and the title follow it.
     k = baseline_index(ds, name1, name2)
-    name1, name2 = stored_order(ms, field, spw, scan, name1, name2)
+    name1, name2 = view_order(ds, name1, name2)
 
     labels_ = [str(p) for p in ds.polarization.values]
     gains = None
@@ -700,7 +777,7 @@ def waterfall(
         with span(f"read {group.resolve(model)}"):
             mvis = ds[group.resolve(model)].isel(sel).values
     if flagversion:
-        flags = _version_flags(ms, flagversion, field, spw, scan, name1, name2, ms_times(ds), corr_idx)
+        flags = _version_flags(ms, flagversion, field, spw, scan, name1, name2, ms_times(ds), corr_idx, labels_)
     else:
         with span("read flags"):
             flags = ds[group.flag].isel(sel).values.astype(bool)

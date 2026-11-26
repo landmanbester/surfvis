@@ -244,7 +244,8 @@ class Flagger:
             name2: Second antenna's name.
             vertices: ``(k, 2)`` polygon in (time slot, channel) coordinates of
                 the waterfall, slots counted on the partition's time grid.
-            corr_idx: Correlations (positions in the MS's FLAG) to flag.
+            corr_idx: Correlations to flag, as positions in the partition's
+                ``polarization`` axis (the MS's FLAG for rows not stored reversed).
             dry_run: Count the cells without writing anything.
 
         Returns:
@@ -270,14 +271,15 @@ class Flagger:
             if not mask.any():
                 raise ValueError("The selection contains no cells")
 
-            # The rows the waterfall shows: the baseline in the order the MS stores it.
-            name1, name2 = msdata.stored_order(self.ms, field_id, spw, scan, name1, name2)
-            rows, times = msdata.baseline_rows(self.ms, field_id, spw, scan, name1, name2)
+            # The rows the waterfall shows: the baseline as xarray-ms presents it,
+            # stored either way round.
+            name1, name2 = msdata.view_order(ds, name1, name2)
+            rows, times, flipped = msdata.baseline_rows(self.ms, field_id, spw, scan, name1, name2)
             if rows.size == 0:
                 raise KeyError(f"No rows for {name1}-{name2} in field {field_id}, spw {spw}, scan {scan}")
             slot, hit = msdata.slot_index(grid, times)
             touched = hit & mask[slot].any(axis=1)
-            rows, slot = rows[touched], slot[touched]
+            rows, slot, flipped = rows[touched], slot[touched], flipped[touched]
             if rows.size == 0:
                 raise ValueError("The selection covers no time slots with data for this baseline")
 
@@ -290,6 +292,11 @@ class Flagger:
                 # (row, channel) cells to set, broadcast over the chosen correlations.
                 cells = np.zeros(flag.shape, dtype=bool)
                 cells[..., corr_idx] = mask[slot][..., None]
+                if flipped.any():
+                    # corr_idx is in the waterfall's order; a reversed row stores
+                    # the cross-hands the other way round.
+                    labels = [str(p) for p in ds.polarization.values]
+                    cells[flipped] = cells[flipped][..., msdata.reversed_correlations(labels)]
                 already = flag | flag_row[:, None, None]
                 summary = {
                     "cells": int(cells.sum()),

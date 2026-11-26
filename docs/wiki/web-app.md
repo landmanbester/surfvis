@@ -3,8 +3,8 @@ type: reference
 title: Chi-squared browser
 description: How surfvis serve links surfchi2 output to on-demand baseline waterfalls, the waterfall's correction / Stokes / flag-version controls, and the xarray-ms facts it depends on.
 tags: [web, fastapi, htmx, xarray-ms, zarr]
-timestamp: 2026-11-06
-last_verified_commit: 5c7561c
+timestamp: 2026-11-26
+last_verified_commit: PENDING
 ---
 
 # Chi-squared browser
@@ -80,30 +80,34 @@ Verified against the `0.4.0a*` line pinned in `pyproject.toml` (see
   (field, spw, scan), so a partition's time axis *is* the scan and the chunk
   can be addressed by integer ids via `partition_key` — no name lookup, no
   boolean filtering over `scan_name`.
-- **Column names are MSv4, resolved via `data_groups`.** `DATA` is exposed as
-  `VISIBILITY` and `WEIGHT_SPECTRUM` as `WEIGHT`. Do not hardcode that: read
-  `node.ds.attrs["data_groups"][group]["correlated_data"]` / `["weight"]` /
-  `["flag"]`, as `pfb-imaging`'s `core/imager.py` does. `msdata.DataGroup`
-  wraps this and `DataGroup.resolve()` translates the MSv2 names the data group
-  maps (`DATA`, `WEIGHT_SPECTRUM`, `FLAG`), so both spellings work in the UI.
-  It must translate **nothing else**: it once mapped `CORRECTED_DATA` to
-  `VISIBILITY` too, so choosing `CORRECTED_DATA` plotted `DATA`.
-- **`data_groups` is attached by `open_datatree`, not `open_dataset`,** and
-  `msdata.data_group()` used to open the tree to read it. That opens every
-  partition, and for each xarray-ms reads the row shapes of every secondary
-  column and `np.unique`s them (`CorrelatedFactory.secondary_variables`): on a
-  real MS the first waterfall sat there for over ten minutes. The MSv2 backend
-  hard-codes the only group (`postprocess_datasets`: `base` is `VISIBILITY` /
-  `WEIGHT` / `FLAG`), so `data_group()` now returns that constant and opens
-  nothing. A test pins that a waterfall never calls `open_datatree`. Per-scan
-  reads use `open_dataset(partition_key=...)`, which pays that row-shape scan
-  for one partition only.
+- **xarray-ms is pinned to a commit of its `write-support` branch**
+  (`0.4.0-alpha.16`, unreleased); see CLAUDE.md for why and when to unpin.
+- **Column names are MSv4.** xarray-ms's standard data groups are `base`
+  (`DATA` → `VISIBILITY`), `corrected` (`CORRECTED_DATA` →
+  `VISIBILITY_CORRECTED`) and `model` (`MODEL_DATA` → `VISIBILITY_MODEL`),
+  all sharing `WEIGHT` (from `WEIGHT_SPECTRUM`) and `FLAG`.
+  `DataGroup.resolve()` translates those MSv2 names and passes everything else
+  through, so both spellings work in the UI. It must never map
+  `CORRECTED_DATA` to `VISIBILITY`: it once did, and choosing
+  `CORRECTED_DATA` plotted `DATA`.
+- **The data groups are constants; never open the datatree to learn them.**
+  `msdata.data_group()` used to read `data_groups` from `open_datatree`,
+  which opens every partition: on a real MS the first waterfall sat there for
+  over ten minutes. A test pins that a waterfall never calls `open_datatree`.
+  Per-scan reads use `open_dataset(partition_key=...)`.
 - Columns that are *not* part of the MSv2 standard are surfaced automatically as
   secondary variables under their own names — which is exactly why `RESIDUAL` is
-  plottable. Standard columns other than `DATA`/`WEIGHT_SPECTRUM` are dropped,
-  except `CORRECTED_DATA`, `MODEL_DATA`, `FLOAT_DATA` and
-  `CORRECTED_WEIGHT_SPECTRUM`. Those four appear under their own names --
-  only once their cells are defined, so an empty `MODEL_DATA` is invisible.
+  plottable -- only once their cells are defined.
+- **Reversed baselines are converted on read** (xarray-ms #201). Baselines are
+  presented upper-triangular; a row stored as `ANTENNA1 > ANTENNA2` is
+  conjugated with its cross-hands swapped (FLAG and WEIGHT: cross-hands
+  swapped). So the waterfall follows xarray-ms's labels (`msdata.view_order`)
+  for gains, cross-hand labels and the title. xarray-ms cannot orient a
+  non-standard column, and drops it from any partition with a reversed row
+  unless told: `_open_partition` passes `baseline_orientation` declaring every
+  non-standard 2-D column (`_orientations`, from the table descriptor)
+  `hermitian`, which is right for visibilities, weights and flags per
+  channel and correlation.
 - **`time` is decoded to unix seconds** (`attrs["format"] == "unix"`). Gain
   tables and flag versions are keyed on the MS's MJD-second `TIME`, so
   `msdata.ms_times()` adds `MJD_UNIX_OFFSET` back before matching.
@@ -276,20 +280,19 @@ The canvas waterfall is in place, but it has no selection tool yet (step 3 of
 - **`POST /flag`** takes `{field, spw, scan, p, q, product, vertices,
   correlations, dry_run}`. `correlations` is `product` (those the plotted
   product is formed from: XX and YY for I) or `all`. Rows are found with
-  `msdata.baseline_rows` (arcae TaQL, shared with the flag-version reader) and
-  mapped to slots with `msdata.slot_index`, in the antenna order the MS
-  stores (`msdata.stored_order`): a baseline stored both ways in one
-  partition is two baselines, and flagging one leaves the other. `FLAG_ROW`
+  `msdata.baseline_rows` (shared with the flag-version reader) and mapped to
+  slots with `msdata.slot_index`. It returns the baseline's rows stored either
+  way round plus a `reversed` mask; on reversed rows the chosen correlations
+  are permuted by `msdata.reversed_correlations` (XY ↔ YX, RL ↔ LR), since
+  `corr_idx` is in the waterfall's (converted) order. The flag-version
+  reader applies the same permutation, so a saved version and the live FLAG
+  agree. A test flags XY on a baseline stored both ways at alternate times.
+  `FLAG_ROW`
   is only ever set (`FLAG_ROW | all(FLAG)`); recomputing it as `all(FLAG)`
   used to unflag rows flagged through FLAG_ROW alone. 403 without
   `--allow-flagging`; 400 for an empty or unformable selection; 422 for
   fewer than three vertices or a negative antenna index; 503 while the backup
   is being written.
-- **xarray-ms mislabels reversed baselines.** A baseline stored as (2, 0) is
-  labelled (0, 2) by `baseline_antenna1/2_name`, but its data stay V_20,
-  unconjugated. So the waterfall and the flag writer take the antenna order
-  from the MS (`stored_order`), never from those labels: gains, cross-hand
-  labels and rows all follow the data.
 - **Backup.** Before any write, FLAG and FLAG_ROW are saved as a CASA flag
   version, `surfvis_before_<UTC to the microsecond>` (seconds alone let two
   sessions collide). `serve --allow-flagging` starts it in a background
@@ -337,9 +340,8 @@ variable lookup. With a directory:
   profiler at a time: an overlapping request just isn't cProfiled.
 
 Spans sit on the cache *misses* (`@timed` below `@lru_cache`), so a hit does
-not appear at all. The expensive ones to watch: `data_group: open_datatree`
-(opens every partition of the MS), `open_partition`, `baseline_rows` (two
-TaQL queries per waterfall via `stored_order`), and the column reads.
+not appear at all. The expensive ones to watch: `open_partition`,
+`scan_rows: query` (one TaQL query per scan), and the column reads.
 
 Requests are only printed when they finish, so a watchdog thread reports any
 request running longer than `STUCK` (10 s), every 10 s, with the spans it is
@@ -373,6 +375,17 @@ With profiling on it prints `[profile] warmed field F spw S scan N: ...`.
 `scan_rows` and `cached_plane` a per-key lock, so a request that arrives while
 the warm-up is reading waits for it instead of repeating it; the wait shows as
 `<what>: wait` (only when it actually waited).
+
+**Third round: the row-shape check is gone upstream.** On the full
+ESO137-006 MS (10,876,320 rows, 64 antennas, 2016 cross-correlation baselines,
+1024 channels, 2 correlations, 24 scans of about 453,600 rows, and 16 secondary
+columns, all `TiledColumnStMan` FixedShape), cProfile of reopening one scan
+with 0.4.0a12 gave 25.0 s, 24.6 s of it `np.unique` in `secondary_variables`.
+(The 14.4 s above was an earlier, unexplained figure.) xarray-ms #183 replaced
+the sort with a comparison against the first row and reads one row's shape
+for FixedShape columns: with 0.5.14, which carries the same code, the reopen
+took 0.06 s and the first open 23.1 s instead of 48.2 s. surfvis now pins the
+write-support commit that carries it.
 
 **Still open:** `invalidate()` (called by the flagger after every write)
 clears xarray-ms's multiton, so the next waterfall rebuilds its structure and

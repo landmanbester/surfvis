@@ -49,7 +49,7 @@ docker run --rm --user "$(id -u):$(id -g)" -e HOME=/tmp -v "$PWD":/src -w /src \
    PYTHONPATH=/tmp/t:/src/src:/src /tmp/t/bin/pytest tests/ -q -W ignore"
 ```
 
-That is the only way to run the full suite (105 tests; the node one skips in the container). **CI does not run them** —
+That is the only way to run the full suite (106 tests; the node one skips in the container). **CI does not run them** —
 `.github/workflows/ci.yml` installs the lightweight package only, deliberately,
 since python-casacore and numba make CI slow and brittle. Verify locally.
 
@@ -147,16 +147,22 @@ forever, with no output. The failure is load-dependent, so it presents as an
 intermittent hang.
 
 **MSv4 renames columns; resolve, do not hardcode.** `DATA` is exposed as
-`VISIBILITY`, `WEIGHT_SPECTRUM` as `WEIGHT`, through `msdata.data_group()`.
-`data_groups` is attached by `open_datatree`, **not** `open_dataset`, but
-**never open the datatree to read it**: that opens every partition, and
-xarray-ms scans every extra column's row shapes in each -- over ten minutes on
-a real MS before the first waterfall. The MSv2 backend hard-codes the one
-`base` group, so `data_group()` returns that constant. Columns
-outside the MSv2 standard (`RESIDUAL`) are not renamed, and neither are
-`CORRECTED_DATA` and `MODEL_DATA`: xarray-ms keeps them as secondary variables
-under their own names. Mapping `CORRECTED_DATA` to `VISIBILITY` (as
-`DataGroup.resolve` once did) silently plots `DATA`.
+`VISIBILITY`, `CORRECTED_DATA` as `VISIBILITY_CORRECTED`, `MODEL_DATA` as
+`VISIBILITY_MODEL` and `WEIGHT_SPECTRUM` as `WEIGHT`, through
+`msdata.data_group().resolve()`. The standard data groups are constants, so
+**never open the datatree to learn them**: that opens every partition, over
+ten minutes on a real MS before the first waterfall. Columns outside the MSv2
+standard (`RESIDUAL`) are not renamed. Mapping `CORRECTED_DATA` to
+`VISIBILITY` (as `DataGroup.resolve` once did) silently plots `DATA`.
+
+**Baselines are presented upper-triangular.** xarray-ms converts a row stored
+as `ANTENNA1 > ANTENNA2` on read (conjugated, cross-hands swapped), so gains,
+labels and titles follow `baseline_antenna1/2_name` (`msdata.view_order`).
+Code that touches MS rows directly -- flag versions, `Flagger` -- gets a
+`reversed` mask from `msdata.baseline_rows` and swaps cross-hands on those
+rows (`msdata.reversed_correlations`). xarray-ms drops non-standard columns
+from partitions with reversed rows unless their orientation is declared, so
+`_open_partition` declares every non-standard 2-D column `hermitian`.
 
 **xarray-ms decodes TIME to unix seconds.** Gain tables and flag versions are
 keyed on the raw MJD-second `TIME`, so `msdata.ms_times()` adds the offset back
@@ -215,9 +221,14 @@ and `serve` need 3.11+.
 
 **The xarray-ms/arcae pins point down, deliberately.** Write support (needed to
 move `flag-chi2` onto `to_msv2`) is on the `0.4.0a*` line, which is cut from
-later commits than `0.5.x`; `0.5.x` has none. Hence `xarray-ms>=0.4.0a12,<0.5.0`,
-`arcae>=0.4.0a14,<0.5.0` and `prerelease = "allow"`, as in pfb-imaging. Never
-raise the ceilings. Allowing prereleases also resolves dask-ms to `0.3.0a1`
+later commits than `0.5.x`; `0.5.x` has none. Hence `arcae>=0.4.0a16,<0.5.0`
+and `prerelease = "allow"`, as in pfb-imaging. Never raise the ceilings.
+xarray-ms is **pinned to a commit of its `write-support` branch**
+(`0.4.0-alpha.16`, not yet on PyPI) for the linear-time row-shape check
+(xarray-ms #183: 25 s per scan open on a MeerKAT MS), reversed-baseline
+conversion (#201) and the corrected/model data groups (#203); the Dockerfile
+installs git to fetch it. Switch back to `xarray-ms>=0.4.0a16,<0.5.0` once that
+alpha is released: PyPI rejects a package with a direct reference. Allowing prereleases also resolves dask-ms to `0.3.0a1`
 and zarr to 3; the suite passes on both.
 
 **New table reads go through arcae, not python-casacore.** surfvis is moving

@@ -346,6 +346,61 @@ def test_rows_out_of_order_missing_and_stored_reversed(chi2_zarr, tmp_path):
 
 
 @needs_web
+def test_a_cross_hand_on_a_reversed_baseline_lands_on_its_partner(chi2_zarr, tmp_path):
+    """XY of the (0, 2) waterfall is YX of the rows stored as (2, 0): V_20 = V_02^H.
+
+    The baseline is stored both ways round, at alternate times. Flagging XY
+    must set XY on the forward rows and YX on the reversed ones, and both the
+    live FLAG (converted by xarray-ms) and a saved flag version (converted
+    here) must read back as XY.
+    """
+    from casacore.tables import table
+
+    from surfvis.web import msdata
+    from surfvis.web.flagging import Flagger
+    from tests.fixtures.ms import add_flag_version
+
+    names = chi2_zarr["ms"]["antenna_names"]
+    ms = str(tmp_path / "mixed.ms")
+    shutil.copytree(chi2_zarr["ms"]["path"], ms)
+    with table(ms, readonly=False, ack=False) as t:
+        a1, a2, times = t.getcol("ANTENNA1"), t.getcol("ANTENNA2"), t.getcol("TIME")
+        grid = np.unique(times)
+        bl = np.flatnonzero((a1 == 0) & (a2 == 2) & np.isin(times, grid[::2]))
+        a1[bl], a2[bl] = 2, 0
+        t.putcol("ANTENNA1", a1)
+        t.putcol("ANTENNA2", a2)
+
+    def flags(product, **kw):
+        return msdata.waterfall(ms, 0, 0, 1, names[0], names[2], product, "RESIDUAL", **kw).flags
+
+    xy_before, yx_before = flags("XY"), flags("YX")
+    before, _ = _flags(ms)
+    ntime = xy_before.shape[0]
+    # Asked for as (2, 0); presented, and flagged, as (0, 2).
+    Flagger(ms).apply(0, 0, 1, names[2], names[0], np.array(_rect(0, ntime - 1, 10, 12)), corr_idx=[1])
+
+    after, _ = _flags(ms)
+    with table(ms, ack=False) as t:
+        a1, a2, scan = t.getcol("ANTENNA1"), t.getcol("ANTENNA2"), t.getcol("SCAN_NUMBER")
+    forward = np.flatnonzero((a1 == 0) & (a2 == 2) & (scan == 1))
+    reverse = np.flatnonzero((a1 == 2) & (a2 == 0) & (scan == 1))
+    assert forward.size and reverse.size
+    expected = before.copy()
+    expected[np.ix_(forward, np.arange(10, 13), [1])] = True
+    expected[np.ix_(reverse, np.arange(10, 13), [2])] = True
+    np.testing.assert_array_equal(after, expected)
+
+    want = xy_before.copy()
+    want[:, 10:13] = True
+    np.testing.assert_array_equal(flags("XY"), want)
+    np.testing.assert_array_equal(flags("YX"), yx_before)
+    add_flag_version(ms, "saved", after, "after the edit")
+    np.testing.assert_array_equal(flags("XY", flagversion="saved"), want)
+    np.testing.assert_array_equal(flags("YX", flagversion="saved"), yx_before)
+
+
+@needs_web
 def test_writes_wait_for_the_background_backup(chi2_zarr, writable_ms, monkeypatch):
     """serve starts the backup at startup; /flag answers 503 until it is written, then works."""
     pytest.importorskip("httpx2")

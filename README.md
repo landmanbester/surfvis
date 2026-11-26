@@ -317,16 +317,20 @@ as an **MSv4** view. MSv4 renames the columns you are used to:
 | You know it as | MSv4 calls it |
 |---|---|
 | `DATA` | `VISIBILITY` |
-| `CORRECTED_DATA` | `CORRECTED_DATA` (kept under its own name) |
+| `CORRECTED_DATA` | `VISIBILITY_CORRECTED` |
+| `MODEL_DATA` | `VISIBILITY_MODEL` |
 | `WEIGHT_SPECTRUM` | `WEIGHT` |
 | `FLAG` | `FLAG` |
 
-surfvis resolves this through the dataset's `data_groups` attribute rather than
-hardcoding the mapping, the same way `pfb-imaging` does, so **either name
-works** in the column selector and on the URL. `CORRECTED_DATA`, `MODEL_DATA`
-and columns that are not part of the MSv2 standard -- `RESIDUAL`, anything your
-calibration pipeline wrote -- are not renamed and appear under their own names. That is precisely why the
-residual column the chi-squared came from is plottable.
+**Either name works** in the column selector and on the URL. Columns that are
+not part of the MSv2 standard -- `RESIDUAL`, anything your calibration
+pipeline wrote -- are not renamed and appear under their own names. That is
+precisely why the residual column the chi-squared came from is plottable.
+
+Baselines are shown with the lower antenna first, as xarray-ms presents them.
+A row the MS stores the other way round (`ANTENNA1 > ANTENNA2`) is converted:
+conjugated, with its cross-hands swapped. Flags you draw on such a baseline
+are written back in the orientation the MS stores.
 
 ### Troubleshooting
 

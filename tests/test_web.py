@@ -172,7 +172,7 @@ def test_residual_is_plottable_but_flag_is_not(chi2_zarr):
 
 @needs_web
 def test_msv2_column_names_resolve_to_msv4(chi2_zarr):
-    """DATA is VISIBILITY and WEIGHT_SPECTRUM is WEIGHT in the MSv4 view."""
+    """DATA is VISIBILITY, CORRECTED_DATA is VISIBILITY_CORRECTED, and so on, in the MSv4 view."""
     from surfvis.web import msdata
 
     group = msdata.data_group(chi2_zarr["ms"]["path"])
@@ -184,9 +184,12 @@ def test_msv2_column_names_resolve_to_msv4(chi2_zarr):
     assert group.resolve("FLAG") == "FLAG"
     # Non-standard columns are not renamed by the MSv4 view.
     assert group.resolve("RESIDUAL") == "RESIDUAL"
-    # Nor are the standard columns xarray-ms keeps as secondary variables.
-    assert group.resolve("CORRECTED_DATA") == "CORRECTED_DATA"
-    assert group.resolve("MODEL_DATA") == "MODEL_DATA"
+    # The corrected and model data groups' correlated data.
+    assert group.resolve("CORRECTED_DATA") == "VISIBILITY_CORRECTED"
+    assert group.resolve("MODEL_DATA") == "VISIBILITY_MODEL"
+    # MSv4 names pass through, so resolving twice is harmless.
+    assert group.resolve("VISIBILITY_MODEL") == "VISIBILITY_MODEL"
+    assert msdata.data_group(chi2_zarr["ms"]["path"], "corrected").correlated_data == "VISIBILITY_CORRECTED"
 
 
 @needs_web
@@ -524,9 +527,9 @@ def test_corrected_data_is_its_own_column(chi2_zarr):
     names = chi2_zarr["ms"]["antenna_names"]
     data = msdata.waterfall(ms, 0, 0, 1, names[0], names[1], "XX", "DATA")
     corrected = msdata.waterfall(ms, 0, 0, 1, names[0], names[1], "XX", "CORRECTED_DATA")
-    assert corrected.column == "CORRECTED_DATA"
+    assert corrected.column == "VISIBILITY_CORRECTED"
     assert not np.allclose(data.values, corrected.values)
-    assert "CORRECTED_DATA" in msdata.available_columns(ms, 0, 0, 1)
+    assert "VISIBILITY_CORRECTED" in msdata.available_columns(ms, 0, 0, 1)
 
 
 @needs_web
@@ -547,15 +550,16 @@ def test_waterfall_forms_the_corrected_residual(chi2_zarr, gain_table, quantity)
     want = (raw.values + 1j * raw_i.values) / (g[:, :, p, 0] * np.conj(g[:, :, q, 0]))
     want = want.real if quantity == "real" else want.imag
     np.testing.assert_allclose(formed.values, want, atol=1e-4)
-    assert formed.column == "corrected VISIBILITY - MODEL_DATA"
+    assert formed.column == "corrected VISIBILITY - VISIBILITY_MODEL"
 
 
 @needs_web
-def test_gains_follow_the_stored_order_not_xarray_ms_labels(chi2_zarr, gain_table, tmp_path):
-    """xarray-ms labels a baseline stored as (6, 2) as (2, 6) without conjugating it.
+def test_a_baseline_stored_reversed_is_shown_upper_triangular(chi2_zarr, gain_table, tmp_path):
+    """xarray-ms presents a baseline stored as (6, 2) as (2, 6), converted to V_26 = V_62^H.
 
-    The data are V_62, so the correction is inv(g_6) V inv(g_2)^H, whichever
-    order the cell asked for and whatever xarray-ms calls it.
+    So the gains follow its labels: the correction is inv(g_2) V_26 inv(g_6)^H,
+    whichever order the cell asked for. RESIDUAL, which xarray-ms cannot
+    orient by itself, must survive in that partition too.
     """
     import shutil
 
@@ -578,14 +582,15 @@ def test_gains_follow_the_stored_order_not_xarray_ms_labels(chi2_zarr, gain_tabl
         model = t.getcol("MODEL_DATA")[bl][scan == 2][..., 0]
 
     g = info["gains"][info["ntime"] :]
-    want = data / (g[:, :, 6, 0] * np.conj(g[:, :, 2, 0])) - model
+    want = np.conj(data) / (g[:, :, 2, 0] * np.conj(g[:, :, 6, 0])) - np.conj(model)
     for request in ((names[2], names[6]), (names[6], names[2])):
         parts = [
             msdata.waterfall(ms, 0, 0, 2, *request, "XX", "DATA", q, model="MODEL_DATA", gtable=gain_table)
             for q in ("real", "imag")
         ]
         np.testing.assert_allclose(parts[0].values + 1j * parts[1].values, want, atol=1e-4)
-        assert (parts[0].antenna1, parts[0].antenna2) == (names[6], names[2])
+        assert (parts[0].antenna1, parts[0].antenna2) == (names[2], names[6])
+    assert "RESIDUAL" in msdata.available_columns(ms, 0, 0, 2)
 
 
 @needs_web
@@ -668,7 +673,7 @@ def test_waterfall_controls(chi2_corrected):
     panel = client.get(base)
     assert panel.status_code == 200
     assert f'value="{chi2_corrected["gtable"]}"' in panel.text
-    assert '<option value="MODEL_DATA" selected>' in panel.text
+    assert '<option value="VISIBILITY_MODEL" selected>' in panel.text
     # chi2 recorded DATA; the menu knows it as VISIBILITY and must not list both.
     assert '<option value="VISIBILITY" selected>' in panel.text
     assert 'value="DATA"' not in panel.text
@@ -907,13 +912,11 @@ def test_scan_rows_are_read_once_per_scan(chi2_zarr, monkeypatch):
     )
 
     for p, q in ((1, 5), (5, 1), (0, 2), (2, 3)):
-        rows, times = msdata.baseline_rows(ms, 0, 0, 1, names[p], names[q])
-        if p < q:  # the fixture stores the lower antenna first
-            assert rows.size == chi2_zarr["ms"]["ntime"] and rows.flags.writeable
-            assert np.all(np.diff(times) > 0)
-        else:
-            assert rows.size == 0
-    assert msdata.stored_order(ms, 0, 0, 1, names[5], names[1]) == (names[1], names[5])
+        rows, times, flipped = msdata.baseline_rows(ms, 0, 0, 1, names[p], names[q])
+        assert rows.size == chi2_zarr["ms"]["ntime"] and rows.flags.writeable
+        assert np.all(np.diff(times) > 0)
+        # The fixture stores the lower antenna first.
+        assert np.all(flipped == (p > q))
     msdata.invalidate(ms)  # what the flagger does after a write
     msdata.baseline_rows(ms, 0, 0, 1, names[1], names[5])
     assert len(queries) == 1
@@ -975,6 +978,6 @@ def test_a_request_waits_for_the_warm_up_instead_of_repeating_it(chi2_zarr, monk
     first = threading.Thread(target=msdata.scan_rows, args=(ms, 0, 0, 1))
     first.start()
     time.sleep(0.1)
-    rows, _ = msdata.baseline_rows(ms, 0, 0, 1, names[1], names[5])
+    rows, _, _ = msdata.baseline_rows(ms, 0, 0, 1, names[1], names[5])
     first.join()
     assert len(queries) == 1 and rows.size == chi2_zarr["ms"]["ntime"]

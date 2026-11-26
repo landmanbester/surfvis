@@ -2,6 +2,11 @@ FROM python:3.11-slim
 
 WORKDIR /app
 
+# git: xarray-ms is pinned to a commit of its write-support branch until that
+# alpha is on PyPI (see pyproject.toml), and uv needs git to fetch it.
+RUN apt-get update && apt-get install -y --no-install-recommends git \
+    && rm -rf /var/lib/apt/lists/*
+
 # Install uv for fast package installation
 COPY --from=ghcr.io/astral-sh/uv:0.9.8 /uv /usr/local/bin/uv
 
