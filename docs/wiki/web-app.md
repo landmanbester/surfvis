@@ -279,8 +279,16 @@ The canvas waterfall is in place, but it has no selection tool yet (step 3 of
   `t - 0.5` / `c + 0.5`. The server's mask is what is written; a client preview
   must use the same rule.
 - **`POST /flag`** takes `{field, spw, scan, p, q, product, vertices,
-  correlations, dry_run}`. `correlations` is `product` (those the plotted
-  product is formed from: XX and YY for I) or `all`. Rows are found with
+  correlations, gtable, flagversion, dry_run}`: the polygon plus the panel's
+  settings it was drawn on. `correlations` is `all` (the default: one flagged
+  correlation should flag them all) or `product`, the correlations the plotted
+  product is formed from, by the waterfall's own rule
+  (`msdata.product_correlations`): XX and YY for I, and all four for
+  anything corrected by a full-Jones gain table. An unset `gtable` means the
+  term `chi2` used, as on `/waterfall`; it must be on the allow-list (403),
+  and a term that is not a gain table is a 400. A non-empty `flagversion`
+  is refused with 409, dry runs too: the picture showed a saved version, not
+  the FLAG the write builds on. Rows are found with
   `msdata.baseline_rows` (shared with the flag-version reader) and mapped to
   slots with `msdata.slot_index`. It returns the baseline's rows stored either
   way round plus a `reversed` mask; on reversed rows the chosen correlations
@@ -307,9 +315,15 @@ The canvas waterfall is in place, but it has no selection tool yet (step 3 of
   a tiled FLAG column's fixed cell shape is read transposed and the copy fails.
   TaQL `SELECT ... GIVING ... AS PLAIN` was rejected: it copies every subtable
   and labels the result a Measurement Set.
-- **Undo** (`POST /flag/undo`) clears exactly the cells the last edit turned
-  on, reading the rows as they are now, and recomputes FLAG_ROW only for rows
-  that edit flagged; 409 when empty. An edit records the changed cells'
+- **Undo** (`POST /flag/undo {"id": n}`) clears exactly the cells edit `n`
+  turned on, reading the rows as they are now, and recomputes FLAG_ROW only
+  for rows that edit flagged. The stack is shared by every tab, so `n` must
+  be the most recent edit (409 otherwise, and when empty): a button showing
+  an older edit cannot undo another tab's newer one. Edit ids are
+  microseconds since the epoch, so they are unique across restarts too.
+  Apply, undo and `/flag/state` report each edit's `Edit.summary()`: id,
+  description, field, spw, scan, `antennas` (in the waterfall's order) and
+  cell counts. An edit records the changed cells'
   indices, not row snapshots: snapshots both wiped later writes by
   `flag-chi2`, CASA or another server, and cost ~59 MB per MeerKAT
   baseline-scan. The stack is per process; the backup version is the durable

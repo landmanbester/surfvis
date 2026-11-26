@@ -32,6 +32,7 @@ import os
 import shutil
 import sys
 import threading
+import time
 import weakref
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -474,7 +475,9 @@ class Flagger:
     _lock: threading.Lock = field(default_factory=threading.Lock)
     _backup_done: threading.Event = field(default_factory=threading.Event)
     _backup_thread: threading.Thread | None = None
-    _next_id: int = 1
+    # Microseconds since the epoch: ids stay unique across restarts, so an undo
+    # button left over from a previous server cannot name a new edit.
+    _next_id: int = field(default_factory=lambda: time.time_ns() // 1000)
     # Set when a write failed and could not be put back; writes are refused.
     broken: str | None = None
     # What recover() did at startup, if anything.

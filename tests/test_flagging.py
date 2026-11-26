@@ -110,13 +110,14 @@ def test_undo_restores_flags_in_reverse_order(chi2_zarr, writable_ms):
     names = chi2_zarr["ms"]["antenna_names"]
     original, original_row = _flags(writable_ms)
     flagger = Flagger(writable_ms)
-    flagger.apply(0, 0, 1, names[0], names[2], np.array(_rect(0, 4, 0, 31)), corr_idx=[0, 1, 2, 3])
+    first = flagger.apply(0, 0, 1, names[0], names[2], np.array(_rect(0, 4, 0, 31)), corr_idx=[0, 1, 2, 3])
     middle, _ = _flags(writable_ms)
-    flagger.apply(0, 0, 1, names[0], names[2], np.array(_rect(5, 8, 2, 6)), corr_idx=[0])
+    second = flagger.apply(0, 0, 1, names[0], names[2], np.array(_rect(5, 8, 2, 6)), corr_idx=[0])
+    assert second["id"] == first["id"] + 1
 
-    assert flagger.undo().id == 2
+    assert flagger.undo().id == second["id"]
     np.testing.assert_array_equal(_flags(writable_ms)[0], middle)
-    assert flagger.undo().id == 1
+    assert flagger.undo().id == first["id"]
     after, after_row = _flags(writable_ms)
     np.testing.assert_array_equal(after, original)
     np.testing.assert_array_equal(after_row, original_row)
@@ -234,6 +235,17 @@ def test_product_correlations_follow_full_jones_gains(chi2_zarr, writable_ms, tm
     assert client.post("/flag", json={**body, "gtable": full}).json()["cells"] == 2 * 6 * 4
     # Only gain tables the server offers.
     assert client.post("/flag", json={**body, "gtable": "/etc"}).status_code == 403
+    # A term that is offered but is not a gain table is a 400, not a 500, and writes nothing.
+    import xarray as xr
+
+    bad = tmp_path / "bad.qc" / "NET"
+    xr.Dataset(attrs={"FIELD_ID": 0, "DATA_DESC_ID": 0, "SCAN_NUMBER": 1}).to_zarr(str(bad / "NET_0"), mode="w")
+    lenient = TestClient(create_app(chi2_zarr["zarr"], ms=writable_ms, gtables=[str(bad)], allow_flagging=True))
+    _wait_for_backup(lenient)
+    before, _ = _flags(writable_ms)
+    r = lenient.post("/flag", json={**body, "gtable": str(bad), "dry_run": False})
+    assert r.status_code == 400 and "not a gain term" in r.json()["detail"]
+    np.testing.assert_array_equal(_flags(writable_ms)[0], before)
 
 
 @needs_web
@@ -266,6 +278,47 @@ def test_undo_reverts_only_the_edit_it_names(chi2_zarr, writable_ms):
     state = client.get("/flag/state").json()
     assert [e["id"] for e in state["edits"]] == [first["id"]]
     assert state["edits"][0]["antennas"] == first["antennas"] and state["edits"][0]["scan"] == 1
+
+    # A button left over from before a restart cannot name an edit made after it.
+    restarted = TestClient(create_app(chi2_zarr["zarr"], ms=writable_ms, allow_flagging=True))
+    _wait_for_backup(restarted)
+    fresh = restarted.post("/flag", json={**body, "q": 4}).json()
+    assert fresh["id"] not in (first["id"], second["id"])
+    assert restarted.post("/flag/undo", json={"id": first["id"]}).status_code == 409
+
+
+@needs_web
+def test_an_unset_gtable_means_the_one_chi2_used(chi2_zarr, tmp_path):
+    """As on /waterfall: a request that leaves gtable out gets the heatmap's term, not none."""
+    pytest.importorskip("httpx2")
+    import shutil
+
+    from fastapi.testclient import TestClient
+
+    from surfvis.core.chi2 import chi2
+    from surfvis.web.app import create_app
+    from tests.fixtures.ms import write_gain_table
+
+    ms = str(tmp_path / "fj.ms")
+    shutil.copytree(chi2_zarr["ms"]["path"], ms)
+    full = write_gain_table(chi2_zarr["ms"], str(tmp_path / "full.qc"), full=True)
+    out = tmp_path / "chi2fj"
+    chi2(ms, rcol="DATA", mcol="MODEL_DATA", gtable=full, dataout=out / "chi2.zarr", imagesout=out / "imgs", nthreads=1)
+    client = TestClient(create_app(out / "chi2.zarr", ms=ms, allow_flagging=True))
+    _wait_for_backup(client)
+    body = {
+        "field": 0,
+        "spw": 0,
+        "scan": 1,
+        "p": 0,
+        "q": 2,
+        "product": "XX",
+        "vertices": _rect(1, 2, 4, 9),
+        "correlations": "product",
+        "dry_run": True,
+    }
+    assert client.post("/flag", json=body).json()["cells"] == 2 * 6 * 4
+    assert client.post("/flag", json={**body, "gtable": ""}).json()["cells"] == 2 * 6
 
 
 @needs_web

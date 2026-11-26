@@ -45,7 +45,8 @@ class FlagRequest(BaseModel):
     # The panel's settings the selection was drawn on. A gain table can change
     # which correlations a product reads; a flag version means the picture is
     # not FLAG, so a selection drawn on it is refused.
-    gtable: str = ""
+    # Unset means the term chi2 used, as on /waterfall.
+    gtable: str | None = None
     flagversion: str = ""
     dry_run: bool = False
 
@@ -510,15 +511,20 @@ def create_app(
                 detail=f"This waterfall shows flag version {req.flagversion!r}, not FLAG; "
                 "switch flags to FLAG (current) to flag.",
             )
-        if not _allowed(req.gtable):
+        try:
+            group = store.group(req.field, req.spw, req.scan)
+        except (KeyError, IndexError, FileNotFoundError) as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        gtable = str(group.attrs.get("gtable", "")) if req.gtable is None else req.gtable.strip()
+        if not _allowed(gtable):
             raise HTTPException(status_code=403, detail="That gain table is not one this server offers.")
         try:
-            names = list(store.group(req.field, req.spw, req.scan).attrs["antenna_names"])
+            names = list(group.attrs["antenna_names"])
             labels = msdata.labels(ms_path, req.field, req.spw, req.scan)
             if req.correlations == "all":
                 corr_idx = list(range(len(labels)))
             else:
-                corr_idx = msdata.product_correlations(ms_path, req.field, req.spw, req.scan, req.product, req.gtable)
+                corr_idx = msdata.product_correlations(ms_path, req.field, req.spw, req.scan, req.product, gtable)
             return flagger_.apply(
                 req.field,
                 req.spw,

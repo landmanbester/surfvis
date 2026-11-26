@@ -116,6 +116,9 @@ def load(
         ValueError: if no or several partitions match, or the grids disagree.
     """
     ds = _select(spec, field, spw, scan, times)
+    missing = [name for name in ("gains", "gain_flags", "gain_time", "gain_freq") if name not in ds.variables]
+    if missing:
+        raise ValueError(f"{spec} is not a gain term: it has no {', '.join(missing)}")
 
     tsel = _align(ds.gain_time.values, np.asarray(times, dtype=float), "time", atol=TIME_TOLERANCE)
     fsel = _align(ds.gain_freq.values, np.asarray(freqs, dtype=float), "frequency", rtol=FREQ_RTOL)
