@@ -49,7 +49,7 @@ docker run --rm --user "$(id -u):$(id -g)" -e HOME=/tmp -v "$PWD":/src -w /src \
    PYTHONPATH=/tmp/t:/src/src:/src /tmp/t/bin/pytest tests/ -q -W ignore"
 ```
 
-That is the only way to run the full suite (107 tests; the node one skips in the container). **CI does not run them** —
+That is the only way to run the full suite (109 tests; the node one skips in the container). **CI does not run them** —
 `.github/workflows/ci.yml` installs the lightweight package only, deliberately,
 since python-casacore and numba make CI slow and brittle. Verify locally.
 
@@ -215,6 +215,16 @@ correlation it reads is flagged. That is what lets a `Flagger` write, wrapped
 in `msdata.writing(ms)`, cost one FLAG read to show instead of a partition
 rebuild (25 s per scan on a MeerKAT MS). `invalidate()` is for data-column
 rewrites only; never call it after a flag write.
+
+**A killed flag write could brick the MS; the journal is what prevents it.**
+casacore flushes a TiledShapeStMan by truncating its header file and writing
+it again, with no fsync, so a kill in between leaves an MS that does not open.
+`Flagger._write` journals the edit and those headers (fsynced) before writing,
+fsyncs the storage managers' files after, and `flagging.recover()` (run by
+`serve --allow-flagging` at startup) restores and rolls back. Any new write
+path must go through `_write`. Never try to open a possibly broken MS inside
+the server: a failed arcae open leaves a lock in casacore's in-process
+registry and the next write hangs, so `_opens()` probes in a child process.
 
 **`serve` opens only the gain tables it offers.** It has no authentication,
 so `gtable` in a query string must not name arbitrary paths: the term `chi2`

@@ -3,10 +3,19 @@ type: log
 title: Wiki changelog
 description: Chronological record of what changed in the wiki and why.
 timestamp: 2026-11-26
-last_verified_commit: ebd836a
+last_verified_commit: 2199c48
 ---
 
 # Wiki changelog
+
+## 2026-11-26 — crash-safe flag writes (verified at `2199c48`)
+
+- **web-app.md:** casacore's truncate-and-rewrite of a TiledShapeStMan header
+  can brick an MS if a write is killed; flag writes are now journalled and
+  fsynced, and `serve --allow-flagging` rolls back an interrupted edit at
+  startup. Broken-MS probes run in a child process (casacore's in-process
+  lock registry); exit waits for a write in flight; backups are renamed into
+  place when complete.
 
 ## 2026-11-26 — flag writes keep the open scan; MSv2 names on screen (verified at `ebd836a`)
 

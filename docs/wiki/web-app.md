@@ -4,7 +4,7 @@ title: Chi-squared browser
 description: How surfvis serve links surfchi2 output to on-demand baseline waterfalls, the waterfall's correction / Stokes / flag-version controls, and the xarray-ms facts it depends on.
 tags: [web, fastapi, htmx, xarray-ms, zarr]
 timestamp: 2026-11-26
-last_verified_commit: ebd836a
+last_verified_commit: 2199c48
 ---
 
 # Chi-squared browser
@@ -312,9 +312,43 @@ The canvas waterfall is in place, but it has no selection tool yet (step 3 of
   that edit flagged; 409 when empty. An edit records the changed cells'
   indices, not row snapshots: snapshots both wiped later writes by
   `flag-chi2`, CASA or another server, and cost ~59 MB per MeerKAT
-  baseline-scan. A write that fails half-way is put back before the error is
-  raised. The stack is per process; the backup version is the durable
-  fallback. `GET /flag/state` lists the edits.
+  baseline-scan. The stack is per process; the backup version is the durable
+  fallback. `GET /flag/state` lists the edits. Apply and undo share one
+  idempotent operation, `_put_cells(table, edit, on)`.
+- **Crash safety: the journal.** casacore flushes a TiledShapeStMan (where
+  real MSs keep FLAG) by truncating its header file `table.f<n>` (`O_TRUNC`)
+  and writing it again, and fsyncs neither the header nor the tiles (strace).
+  Killed in between -- reproduced with strace fault injection through the
+  real `Flagger` -- the header is empty and neither casacore nor arcae opens
+  the MS. A flag write leaves that header byte-identical (tiles are rewritten
+  in place), so a copy taken just before the write restores it exactly. So
+  `Flagger._write`: (1) writes `<ms>.flagversions/surfvis_journal/` -- the
+  edit's rows, changed cells and FLAG_ROW rows, plus copies of the
+  `table.f<n>` files (up to 64 MB, i.e. headers, not SSM data) of the storage
+  managers holding FLAG and FLAG_ROW -- fsynced, built under a temporary name
+  and renamed into place; (2) writes; (3) fsyncs every file of those storage
+  managers and the MS directory; (4) retires the journal (renamed aside, then
+  deleted). Even with a read handle held open (as xarray-ms does), casacore's
+  flush happens inside `putcol`, never after `close` returns, so the window
+  is fully covered. `flagging.recover(ms)` runs at `serve --allow-flagging`
+  startup, before the backup: if the MS does not open it puts the saved
+  headers back (keeping the files as found in `found/`), then clears the
+  journalled cells -- which rolls back an apply and completes an undo -- and
+  is itself safe to interrupt. A write that raises in-process runs the same
+  recovery at once; if that fails too, `Flagger.broken` is set and writes are
+  refused until a restart. 25 random `kill -9`s during a stream of edits (7
+  of them mid-write) left every MS openable and no edit half-applied.
+- **Never open a possibly broken MS in the server process.** `_opens()`
+  probes in a child process: a failed arcae open of the broken MS left a read
+  lock in casacore's in-process lock registry (`FileLocker::acquire` waits on
+  a condition variable, not fcntl), and the recovery write then hung, in 5 of
+  8 runs.
+- **Exit waits for a write in flight.** An atexit handler takes each live
+  `Flagger`'s lock (up to 120 s): FastAPI runs the write in a daemon worker
+  thread, which Ctrl-C does not interrupt but interpreter exit would kill.
+- **The backup is written as `.flags.<name>.partial`**, fsynced and renamed,
+  and only then listed in `FLAG_VERSION_LIST`, so a backup cut short never
+  looks usable.
 - A write is wrapped in `msdata.writing(ms)` and clears nothing: no cache
   holds FLAG (see "Plane cache"), so the next waterfall reads the new flags
   by row (about 0.03 s on com08) and keeps the open partition and the cached
