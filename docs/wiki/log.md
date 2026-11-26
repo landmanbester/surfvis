@@ -2,11 +2,20 @@
 type: log
 title: Wiki changelog
 description: Chronological record of what changed in the wiki and why.
-timestamp: 2026-11-06
-last_verified_commit: 5c7561c
+timestamp: 2026-11-26
+last_verified_commit: 9ef9390
 ---
 
 # Wiki changelog
+
+## 2026-11-26 — xarray-ms write-support branch (verified at `9ef9390`)
+
+- **web-app.md:** xarray-ms pinned to a write-support commit; the
+  corrected/model data groups (`VISIBILITY_CORRECTED`, `VISIBILITY_MODEL`);
+  reversed baselines converted on read, `stored_order` replaced by
+  `view_order`, cross-hands swapped on reversed rows by the flag writer and
+  the flag-version reader; non-standard columns declared `hermitian`; the
+  third profiling round (row-shape check: 25 s to 0.06 s per scan open).
 
 ## 2026-11-06 — warm-up, per-scan rows, vectorised heatmap colours (verified at `5c7561c`)
 
