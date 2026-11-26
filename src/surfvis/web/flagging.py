@@ -42,6 +42,10 @@ import numpy as np
 # MS (a MeerKAT row is up to 32k channels x 4 correlations).
 BACKUP_CHUNK_BYTES = 256 * 2**20
 
+# Selections are drawn on a waterfall a few thousand cells across; a vertex
+# beyond this is a crafted request, and would overflow the edge arithmetic.
+MAX_COORDINATE = 1e9
+
 # The write journal, in ``<ms>.flagversions/``. Present only while a write is
 # in progress, or after one was interrupted.
 JOURNAL = "surfvis_journal"
@@ -72,13 +76,17 @@ def rasterise(vertices: np.ndarray, ntime: int, nchan: int) -> np.ndarray:
         Boolean mask of shape ``(ntime, nchan)``.
 
     Raises:
-        ValueError: if there are fewer than three vertices or any is not finite.
+        ValueError: if there are fewer than three vertices, or any is not finite
+            or beyond ``MAX_COORDINATE``.
     """
     verts = np.asarray(vertices, dtype=float)
     if verts.ndim != 2 or verts.shape[1] != 2 or verts.shape[0] < 3:
         raise ValueError(f"A polygon needs at least three (slot, channel) vertices, got shape {verts.shape}")
     if not np.isfinite(verts).all():
         raise ValueError("Polygon vertices must be finite")
+    if np.abs(verts).max() > MAX_COORDINATE:
+        # Far beyond any waterfall, and big enough to overflow the edge arithmetic.
+        raise ValueError(f"Polygon vertices must lie within +/-{MAX_COORDINATE:g} of the grid")
 
     mask = np.zeros((ntime, nchan), dtype=bool)
     t0, t1 = verts[:, 0], np.roll(verts[:, 0], -1)

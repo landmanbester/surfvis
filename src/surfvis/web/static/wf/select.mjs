@@ -6,6 +6,9 @@
 // cell for cell, so the arithmetic is the same expression in the same order
 // (tests/js/rasterise.test.mjs checks it against cases Python pins).
 
+// As flagging.MAX_COORDINATE: beyond this the edge arithmetic can overflow.
+export const MAX_COORDINATE = 1e9;
+
 // Covered cells as row spans: [[slot, firstChannel, stopChannel], ...], stop
 // exclusive, in increasing slot then channel order. Spans rather than a mask:
 // a 32k-channel waterfall makes a full mask 15 MB for one stroke.
@@ -15,6 +18,9 @@ export function rasterise(vertices, ntime, nchan) {
   }
   for (const [t, c] of vertices) {
     if (!Number.isFinite(t) || !Number.isFinite(c)) throw new Error("Polygon vertices must be finite");
+    if (Math.abs(t) > MAX_COORDINATE || Math.abs(c) > MAX_COORDINATE) {
+      throw new Error(`Polygon vertices must lie within ±${MAX_COORDINATE} of the grid`);
+    }
   }
   const n = vertices.length;
   let tmin = Infinity;
@@ -66,15 +72,21 @@ export function countCells(spans) {
   return n;
 }
 
-// The four-vertex polygon around the cells a drag from (t0, c0) to (t1, c1)
-// touches, in data coordinates: corners snap outwards to cell edges, so the
-// rectangle covers every cell the drag passed over.
+// The four-vertex polygon around the cells a drag from point a to point b
+// ({t, c} in data coordinates) passed over: corners snap outwards to cell
+// edges, clamped to the plane. Null if the drag never touched the plane.
 export function dragRectangle(a, b, ntime, nchan) {
   const clamp = (v, lo, hi) => Math.min(Math.max(v, lo), hi);
-  const t0 = clamp(Math.round(Math.min(a.t, b.t)), 0, ntime - 1);
-  const t1 = clamp(Math.round(Math.max(a.t, b.t)), 0, ntime - 1);
-  const c0 = clamp(Math.round(Math.min(a.c, b.c)), 0, nchan - 1);
-  const c1 = clamp(Math.round(Math.max(a.c, b.c)), 0, nchan - 1);
+  const tlo = Math.min(a.t, b.t);
+  const thi = Math.max(a.t, b.t);
+  const clo = Math.min(a.c, b.c);
+  const chi = Math.max(a.c, b.c);
+  // Cell k spans [k - 0.5, k + 0.5); the plane spans [-0.5, n - 0.5).
+  if (thi < -0.5 || tlo >= ntime - 0.5 || chi < -0.5 || clo >= nchan - 0.5) return null;
+  const t0 = clamp(Math.round(tlo), 0, ntime - 1);
+  const t1 = clamp(Math.round(thi), 0, ntime - 1);
+  const c0 = clamp(Math.round(clo), 0, nchan - 1);
+  const c1 = clamp(Math.round(chi), 0, nchan - 1);
   return [
     [t0 - 0.5, c0 - 0.5],
     [t0 - 0.5, c1 + 0.5],

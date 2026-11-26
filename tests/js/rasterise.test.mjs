@@ -8,7 +8,7 @@ import { rasterise, countCells, dragRectangle } from "../../src/surfvis/web/stat
 const cases = JSON.parse(readFileSync(new URL("./rasterise_cases.json", import.meta.url), "utf8"));
 
 test("agrees with the Python rasteriser on every pinned case", () => {
-  assert.ok(cases.length > 40);
+  assert.ok(cases.length > 200);
   for (const c of cases) {
     assert.deepEqual(rasterise(c.vertices, c.ntime, c.nchan), c.spans, c.name);
   }
@@ -23,6 +23,11 @@ test("a drag covers every cell it passed over, whichever way it went", () => {
   assert.deepEqual(rect, [[1.5, 1.5], [1.5, 8.5], [4.5, 8.5], [4.5, 1.5]]);
   const spans = rasterise(rect, 10, 12);
   assert.equal(countCells(spans), 3 * 7); // slots 2-4, channels 2-8
+  // A drag that never touched the plane selects nothing.
+  assert.equal(dragRectangle({ t: -5, c: 2 }, { t: -2, c: 3 }, 10, 12), null);
+  assert.equal(dragRectangle({ t: 2, c: 12 }, { t: 4, c: 30 }, 10, 12), null);
+  // A click is one cell.
+  assert.deepEqual(dragRectangle({ t: 3.2, c: 4.9 }, { t: 3.2, c: 4.9 }, 10, 12), [[2.5, 4.5], [2.5, 5.5], [3.5, 5.5], [3.5, 4.5]]);
   // Clamped to the plane.
   assert.deepEqual(dragRectangle({ t: -3, c: -3 }, { t: 30, c: 30 }, 10, 12), [[-0.5, -0.5], [-0.5, 11.5], [9.5, 11.5], [9.5, -0.5]]);
 });
@@ -30,4 +35,5 @@ test("a drag covers every cell it passed over, whichever way it went", () => {
 test("rejects degenerate polygons", () => {
   assert.throws(() => rasterise([[0, 0], [1, 1]], 4, 4));
   assert.throws(() => rasterise([[0, 0], [1, NaN], [2, 0]], 4, 4));
+  assert.throws(() => rasterise([[0, 0], [10, 1e308], [10, -1e308]], 12, 12), /within/);
 });

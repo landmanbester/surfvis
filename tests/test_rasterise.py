@@ -61,6 +61,9 @@ def test_rasterise_rejects_degenerate_input():
         rasterise(np.array([(0.0, 0.0), (1.0, 1.0)]), 4, 4)
     with pytest.raises(ValueError):
         rasterise(np.array([(0.0, 0.0), (1.0, np.nan), (2.0, 0.0)]), 4, 4)
+    # Big enough to overflow the edge arithmetic: rejected, not a 500.
+    with pytest.raises(ValueError, match="within"):
+        rasterise(np.array([(0.0, 0.0), (10.0, 1e308), (10.0, -1e308)]), 12, 12)
 
 
 CASES = Path(__file__).parent / "js" / "rasterise_cases.json"
@@ -87,6 +90,24 @@ def _cases() -> list[dict]:
         if grid:
             v = np.round(v / grid) * grid
         shapes.append((f"random {k}", v.tolist(), 12, 12))
+    # Near ties, where the crossing lands within rounding of a cell centre and
+    # only the same arithmetic in the same order agrees: thirds and tenths are
+    # not exact in binary, and integers nudged by 1e-3 sit next to the ties.
+    for k in range(160):
+        n = int(rng.integers(3, 12))
+        kind = k % 4
+        v = rng.uniform(-4, 24, size=(n, 2))
+        if kind == 0:
+            v = np.round(v * 3) / 3
+        elif kind == 1:
+            v = np.round(v * 10) / 10
+        elif kind == 2:
+            v = np.round(v) + rng.choice([-1e-3, 0.0, 1e-3], size=v.shape)
+        else:
+            v = np.round(v * 2) / 2 + rng.choice([-1e-9, 0.0, 1e-9], size=v.shape)
+        shapes.append((f"near tie {k}", v.tolist(), 20, 20))
+    # Found by fuzzing: an edge reordering of the interpolation gets row 16 wrong.
+    shapes.append(("mined", [[13.5, -4.0], [19.0, 18.5], [22.5, 15.0], [16.0, 0.0], [-4.5, -3.0]], 20, 20))
     out = []
     for name, vertices, ntime, nchan in shapes:
         mask = rasterise(np.array(vertices, dtype=float), ntime, nchan)
