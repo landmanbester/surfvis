@@ -3,6 +3,10 @@
 numpy only, so these run wherever numpy is installed -- no Measurement Set.
 """
 
+import json
+import os
+from pathlib import Path
+
 import pytest
 
 np = pytest.importorskip("numpy")
@@ -57,3 +61,50 @@ def test_rasterise_rejects_degenerate_input():
         rasterise(np.array([(0.0, 0.0), (1.0, 1.0)]), 4, 4)
     with pytest.raises(ValueError):
         rasterise(np.array([(0.0, 0.0), (1.0, np.nan), (2.0, 0.0)]), 4, 4)
+
+
+CASES = Path(__file__).parent / "js" / "rasterise_cases.json"
+
+
+def _cases() -> list[dict]:
+    """Polygons for the JS port to agree with: the shapes above, then random ones.
+
+    Random vertices sit on integers, half-integers and arbitrary values, so
+    centres on edges and vertices on centre lines both occur.
+    """
+    rng = np.random.default_rng(16)
+    shapes = [
+        ("rectangle", _rect(2, 4, 3, 7), 10, 12),
+        ("triangle", [(-0.5, -0.5), (-0.5, 4.0), (4.0, -0.5)], 6, 6),
+        ("bow tie", [(0.0, 0.0), (10.0, 10.0), (10.0, 0.0), (0.0, 10.0)], 11, 11),
+        ("clipped", _rect(-5, 2, 30, 40), 6, 34),
+        ("vertex on a centre line", [(1.0, 0.2), (3.0, 4.7), (5.0, 0.2), (3.0, 2.0)], 7, 6),
+    ]
+    for k in range(40):
+        n = int(rng.integers(3, 9))
+        grid = rng.choice([1.0, 0.5, 0.0], p=[0.3, 0.3, 0.4])
+        v = rng.uniform(-2, 14, size=(n, 2))
+        if grid:
+            v = np.round(v / grid) * grid
+        shapes.append((f"random {k}", v.tolist(), 12, 12))
+    out = []
+    for name, vertices, ntime, nchan in shapes:
+        mask = rasterise(np.array(vertices, dtype=float), ntime, nchan)
+        spans = []
+        for i, row in enumerate(mask):
+            edges = np.flatnonzero(np.diff(np.concatenate([[0], row.astype(np.int8), [0]])))
+            spans += [[i, int(a), int(b)] for a, b in zip(edges[0::2], edges[1::2], strict=True)]
+        vertices = [[float(t), float(c)] for t, c in vertices]
+        out.append({"name": name, "vertices": vertices, "ntime": ntime, "nchan": nchan, "spans": spans})
+    return out
+
+
+def test_js_cases_match_python():
+    """tests/js/rasterise_cases.json is what this rasteriser says; the JS port is checked against it.
+
+    Regenerate with SURFVIS_REGEN_JS_CASES=1 after a deliberate change to the rule.
+    """
+    cases = _cases()
+    if os.environ.get("SURFVIS_REGEN_JS_CASES"):
+        CASES.write_text(json.dumps(cases, indent=None, separators=(",", ":")) + "\n")
+    assert json.loads(CASES.read_text()) == cases
