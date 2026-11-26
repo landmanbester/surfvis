@@ -161,7 +161,7 @@ def test_flag_routes(chi2_zarr, writable_ms):
     before, _ = _flags(writable_ms)
 
     # Stokes I is formed from XX and YY, so those are the correlations flagged.
-    out = client.post("/flag", json=body).json()
+    out = client.post("/flag", json={**body, "correlations": "product"}).json()
     assert out["cells"] == 2 * 6 * 2
     after, _ = _flags(writable_ms)
     rows = _baseline_rows(writable_ms, 0, 2, scan=1)
@@ -169,15 +169,16 @@ def test_flag_routes(chi2_zarr, writable_ms):
     assert set(changed[:, 0]) <= set(rows[1:3]) and set(changed[:, 2]) <= {0, 3}
     assert after[np.ix_(rows[1:3], np.arange(4, 10), [0, 3])].all()
 
-    allcorr = client.post("/flag", json={**body, "correlations": "all", "dry_run": True}).json()
+    # All correlations is the default: one flagged correlation flags them all.
+    allcorr = client.post("/flag", json={**body, "dry_run": True}).json()
     assert allcorr["cells"] == 2 * 6 * 4
 
     state = client.get("/flag/state").json()
     assert state["enabled"] and len(state["edits"]) == 1 and state["backup"]
 
-    assert client.post("/flag/undo").json()["undone"] == out["id"]
+    assert client.post("/flag/undo", json={"id": out["id"]}).json()["undone"] == out["id"]
     np.testing.assert_array_equal(_flags(writable_ms)[0], before)
-    assert client.post("/flag/undo").status_code == 409
+    assert client.post("/flag/undo", json={"id": out["id"]}).status_code == 409
 
     assert client.post("/flag", json={**body, "vertices": [(0, 0), (1, 1)]}).status_code == 422
     # A negative antenna index must not wrap round to another baseline.
@@ -185,7 +186,86 @@ def test_flag_routes(chi2_zarr, writable_ms):
     assert client.post("/flag", json={**body, "p": 99}).status_code == 404
     assert client.post("/flag", json={**body, "vertices": _rect(50, 60, 0, 3)}).status_code == 400
     # Linear feeds cannot form RR.
-    assert client.post("/flag", json={**body, "product": "RR"}).status_code == 400
+    assert client.post("/flag", json={**body, "product": "RR", "correlations": "product"}).status_code == 400
+
+
+@needs_web
+def test_a_selection_drawn_over_a_saved_flag_version_is_refused(chi2_zarr, writable_ms):
+    """The picture shows a version's flags; the write would build on FLAG. Refuse, even a dry run."""
+    pytest.importorskip("httpx2")
+    from fastapi.testclient import TestClient
+
+    from surfvis.web.app import create_app
+
+    client = TestClient(create_app(chi2_zarr["zarr"], ms=writable_ms, allow_flagging=True))
+    _wait_for_backup(client)
+    before, _ = _flags(writable_ms)
+    body = {"field": 0, "spw": 0, "scan": 1, "p": 0, "q": 2, "product": "XX", "vertices": _rect(1, 2, 4, 9)}
+    for dry_run in (True, False):
+        r = client.post("/flag", json={**body, "flagversion": "older", "dry_run": dry_run})
+        assert r.status_code == 409 and "FLAG (current)" in r.json()["detail"]
+    np.testing.assert_array_equal(_flags(writable_ms)[0], before)
+
+
+@needs_web
+def test_product_correlations_follow_full_jones_gains(chi2_zarr, writable_ms, tmp_path):
+    """Corrected XX with full-Jones gains is formed from all four correlations, so all four are flagged."""
+    pytest.importorskip("httpx2")
+    from fastapi.testclient import TestClient
+
+    from surfvis.web.app import create_app
+    from tests.fixtures.ms import write_gain_table
+
+    full = write_gain_table(chi2_zarr["ms"], str(tmp_path / "full.qc"), full=True)
+    client = TestClient(create_app(chi2_zarr["zarr"], ms=writable_ms, gtables=[full], allow_flagging=True))
+    _wait_for_backup(client)
+    body = {
+        "field": 0,
+        "spw": 0,
+        "scan": 1,
+        "p": 0,
+        "q": 2,
+        "product": "XX",
+        "vertices": _rect(1, 2, 4, 9),
+        "correlations": "product",
+        "dry_run": True,
+    }
+    assert client.post("/flag", json=body).json()["cells"] == 2 * 6
+    assert client.post("/flag", json={**body, "gtable": full}).json()["cells"] == 2 * 6 * 4
+    # Only gain tables the server offers.
+    assert client.post("/flag", json={**body, "gtable": "/etc"}).status_code == 403
+
+
+@needs_web
+def test_undo_reverts_only_the_edit_it_names(chi2_zarr, writable_ms):
+    """Another tab's newer edit is not undone by a button that named an older one."""
+    pytest.importorskip("httpx2")
+    from fastapi.testclient import TestClient
+
+    from surfvis.web.app import create_app
+
+    client = TestClient(create_app(chi2_zarr["zarr"], ms=writable_ms, allow_flagging=True))
+    _wait_for_backup(client)
+    body = {"field": 0, "spw": 0, "scan": 1, "p": 0, "q": 2, "product": "XX", "vertices": _rect(1, 2, 4, 9)}
+    first = client.post("/flag", json=body).json()
+    assert (
+        first["description"]
+        == f"{chi2_zarr['ms']['antenna_names'][0]}-{chi2_zarr['ms']['antenna_names'][2]} field 0 spw 0 scan 1"
+    )
+    assert (first["field"], first["spw"], first["scan"]) == (0, 0, 1)
+    assert first["antennas"] == [chi2_zarr["ms"]["antenna_names"][0], chi2_zarr["ms"]["antenna_names"][2]]
+    second = client.post("/flag", json={**body, "q": 3}).json()
+    after_both, _ = _flags(writable_ms)
+
+    stale = client.post("/flag/undo", json={"id": first["id"]})
+    assert stale.status_code == 409 and str(second["id"]) in stale.json()["detail"]
+    np.testing.assert_array_equal(_flags(writable_ms)[0], after_both)
+    assert client.post("/flag/undo").status_code == 422  # the id is required
+
+    assert client.post("/flag/undo", json={"id": second["id"]}).json()["undone"] == second["id"]
+    state = client.get("/flag/state").json()
+    assert [e["id"] for e in state["edits"]] == [first["id"]]
+    assert state["edits"][0]["antennas"] == first["antennas"] and state["edits"][0]["scan"] == 1
 
 
 @needs_web

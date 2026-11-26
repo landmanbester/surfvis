@@ -183,8 +183,12 @@ def make_ms(
     }
 
 
-def write_gain_table(info: dict, path: str, term: str = "NET") -> str:
+def write_gain_table(info: dict, path: str, term: str = "NET", full: bool = False) -> str:
     """Write ``info["gains"]`` the way QuartiCal lays out a gain term.
+
+    ``full`` writes a full-Jones term instead: the same diagonal with zero
+    off-diagonals, so it corrects identically but mixes all four
+    correlations.
 
     One zarr group per (field, spw, scan) -- ``<path>/<term>/<term>_<n>`` --
     holding ``gains`` ``(gain_time, gain_freq, antenna, direction,
@@ -199,6 +203,11 @@ def write_gain_table(info: dict, path: str, term: str = "NET") -> str:
     for n in range(nscan):
         sl = slice(n * ntime, (n + 1) * ntime)
         g = info["gains"][sl][:, :, :, None, :]
+        corrs = ["XX", "YY"]
+        if full:
+            zero = np.zeros_like(g[..., :1])
+            g = np.concatenate([g[..., :1], zero, zero, g[..., 1:]], axis=-1)
+            corrs = ["XX", "XY", "YX", "YY"]
         ds = xr.Dataset(
             {
                 "gains": (("gain_time", "gain_freq", "antenna", "direction", "correlation"), g),
@@ -209,7 +218,7 @@ def write_gain_table(info: dict, path: str, term: str = "NET") -> str:
                 "gain_freq": info["freqs"],
                 "antenna": info["antenna_names"],
                 "direction": [0],
-                "correlation": ["XX", "YY"],
+                "correlation": corrs,
             },
             attrs={"FIELD_ID": 0, "DATA_DESC_ID": 0, "SCAN_NUMBER": n + 1, "TYPE": "complex"},
         )

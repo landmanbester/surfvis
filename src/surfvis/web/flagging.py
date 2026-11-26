@@ -413,6 +413,10 @@ class BackupPendingError(RuntimeError):
     """Writes wait until the backup flag version is complete."""
 
 
+class StaleUndoError(LookupError):
+    """The edit an undo named is no longer the most recent one."""
+
+
 @dataclass
 class Edit:
     """One applied selection: exactly the cells it changed, so undo touches nothing else."""
@@ -428,6 +432,24 @@ class Edit:
     cells: int
     newly_flagged: int
     description: str
+    # Where: the partition and the baseline as the waterfall presents it.
+    field: int = -1
+    spw: int = -1
+    scan: int = -1
+    antennas: tuple[str, str] = ("", "")
+
+    def summary(self) -> dict:
+        """What a client needs to name, find and undo this edit."""
+        return {
+            "id": self.id,
+            "description": self.description,
+            "field": self.field,
+            "spw": self.spw,
+            "scan": self.scan,
+            "antennas": list(self.antennas),
+            "cells": self.cells,
+            "newly_flagged": self.newly_flagged,
+        }
 
 
 @dataclass(eq=False)  # compared and hashed by identity: one per server
@@ -600,10 +622,14 @@ class Flagger:
                 cells=summary["cells"],
                 newly_flagged=summary["newly_flagged"],
                 description=f"{name1}-{name2} field {field_id} spw {spw} scan {scan}",
+                field=field_id,
+                spw=spw,
+                scan=scan,
+                antennas=(name1, name2),
             )
             self._write(edit, on=True)
             self._record(edit)
-            return {"id": edit.id, **summary}
+            return {**edit.summary(), **summary}
 
     def _write(self, edit: Edit, on: bool) -> None:
         """Set or clear an edit's cells, journalled; on failure, put the MS back as it was before the edit.
@@ -662,17 +688,29 @@ class Flagger:
         self._next_id += 1
         self.edits.append(edit)
 
-    def undo(self) -> Edit | None:
+    def undo(self, edit_id: int | None = None) -> Edit | None:
         """Clear the cells the most recent edit set. None if there is nothing to undo.
 
         Reads the rows as they are now and clears only the recorded cells, so
         flags written since by anything else survive. FLAG_ROW is recomputed
         only for rows this edit flagged.
+
+        Args:
+            edit_id: The edit the caller means to undo. The stack is shared by
+                every tab on the server, so a button showing an older edit
+                must not undo a newer one made elsewhere.
+
+        Raises:
+            StaleUndoError: if ``edit_id`` is not the most recent edit.
         """
         with self._lock:
             if not self.edits:
                 return None
             edit = self.edits[-1]
+            if edit_id is not None and edit_id != edit.id:
+                raise StaleUndoError(
+                    f"Edit {edit_id} is no longer the most recent; the latest is edit {edit.id} ({edit.description})"
+                )
             try:
                 self._write(edit, on=False)
             except Exception as exc:

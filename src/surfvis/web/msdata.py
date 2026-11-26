@@ -908,6 +908,21 @@ def _formed(
     )
 
 
+def product_correlations(ms: str, field: int, spw: int, scan: int, product: str, gtable: str = "") -> list[int]:
+    """Positions in the partition's polarization axis of the correlations ``product`` is formed from.
+
+    The same rule :func:`waterfall` uses, so a selection flags what the
+    waterfall plotted: full-Jones gains mix all four correlations into each.
+
+    Raises:
+        ValueError: if the product cannot be formed, or the gains are not usable.
+    """
+    ds = _open(ms, field, spw, scan)
+    labels_ = [str(p) for p in ds.polarization.values]
+    full = bool(gtable) and _gains(ms, gtable, field, spw, scan, ds)[0].full
+    return [labels_.index(c) for c in products.needed([product], labels_, full_jones=full)]
+
+
 def _with_flags(ms: str, field: int, spw: int, scan: int, wf: Waterfall, flagversion: str = "") -> Waterfall:
     """``wf`` with FLAG (or a flag version) as it is on disk now added to its flags."""
     ds = _open(ms, field, spw, scan)

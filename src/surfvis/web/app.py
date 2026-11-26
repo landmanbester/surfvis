@@ -15,9 +15,8 @@ from fastapi.templating import Jinja2Templates
 from pydantic import BaseModel, Field
 
 from surfvis.utils import gains as gains_mod
-from surfvis.utils import products as products_mod
 from surfvis.web import flagging, msdata, planes, profiling, render
-from surfvis.web.flagging import BackupPendingError, Flagger
+from surfvis.web.flagging import BackupPendingError, Flagger, StaleUndoError
 from surfvis.web.store import Chi2Store, Selection
 
 HERE = Path(__file__).parent
@@ -40,9 +39,21 @@ class FlagRequest(BaseModel):
     q: int = Field(ge=0)
     product: str
     vertices: list[tuple[float, float]] = Field(min_length=3)
-    # "product": the correlations the plotted product is formed from; "all": every correlation.
-    correlations: Literal["product", "all"] = "product"
+    # "all" (the default: one flagged correlation should flag them all) or
+    # "product": the correlations the plotted product is formed from.
+    correlations: Literal["product", "all"] = "all"
+    # The panel's settings the selection was drawn on. A gain table can change
+    # which correlations a product reads; a flag version means the picture is
+    # not FLAG, so a selection drawn on it is refused.
+    gtable: str = ""
+    flagversion: str = ""
     dry_run: bool = False
+
+
+class UndoRequest(BaseModel):
+    """The edit the undo button named."""
+
+    id: int
 
 
 class RevalidatedStaticFiles(StaticFiles):
@@ -493,13 +504,21 @@ def create_app(
     def flag(req: FlagRequest):
         """Flag the cells inside a polygon on one baseline, or count them with ``dry_run``."""
         flagger_ = _flagger()
+        if req.flagversion:
+            raise HTTPException(
+                status_code=409,
+                detail=f"This waterfall shows flag version {req.flagversion!r}, not FLAG; "
+                "switch flags to FLAG (current) to flag.",
+            )
+        if not _allowed(req.gtable):
+            raise HTTPException(status_code=403, detail="That gain table is not one this server offers.")
         try:
             names = list(store.group(req.field, req.spw, req.scan).attrs["antenna_names"])
             labels = msdata.labels(ms_path, req.field, req.spw, req.scan)
             if req.correlations == "all":
                 corr_idx = list(range(len(labels)))
             else:
-                corr_idx = [labels.index(c) for c in products_mod.needed([req.product], labels)]
+                corr_idx = msdata.product_correlations(ms_path, req.field, req.spw, req.scan, req.product, req.gtable)
             return flagger_.apply(
                 req.field,
                 req.spw,
@@ -520,12 +539,15 @@ def create_app(
             raise HTTPException(status_code=503, detail=str(exc)) from exc
 
     @app.post("/flag/undo")
-    def flag_undo():
-        """Restore the cells the most recent flag edit changed."""
-        edit = _flagger().undo()
+    def flag_undo(req: UndoRequest):
+        """Restore the cells the named edit changed, if it is still the most recent."""
+        try:
+            edit = _flagger().undo(req.id)
+        except StaleUndoError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
         if edit is None:
             raise HTTPException(status_code=409, detail="Nothing to undo")
-        return {"undone": edit.id, "description": edit.description, "cells": edit.cells}
+        return {"undone": edit.id, **edit.summary()}
 
     @app.get("/flag/state")
     def flag_state():
@@ -538,10 +560,7 @@ def create_app(
             "backup_error": flagger.backup_error,
             "recovered": flagger.recovered,
             "broken": flagger.broken,
-            "edits": [
-                {"id": e.id, "description": e.description, "cells": e.cells, "newly_flagged": e.newly_flagged}
-                for e in flagger.edits
-            ],
+            "edits": [e.summary() for e in flagger.edits],
         }
 
     @app.get("/healthz")
