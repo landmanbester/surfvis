@@ -3,10 +3,16 @@ type: log
 title: Wiki changelog
 description: Chronological record of what changed in the wiki and why.
 timestamp: 2026-11-26
-last_verified_commit: 9ef9390
+last_verified_commit: 33069db
 ---
 
 # Wiki changelog
+
+## 2026-11-26 — checked against a live server on com08 (verified at `33069db`)
+
+- **web-app.md:** mirrored heatmap cells share a plane-cache entry; what a
+  waterfall costs on a MeerKAT MS, and why the column reads are slow (the
+  MS's tiling).
 
 ## 2026-11-26 — xarray-ms write-support branch (verified at `9ef9390`)
 
