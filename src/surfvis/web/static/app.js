@@ -123,6 +123,8 @@ document.body.addEventListener("mousemove", (e) => {
 document.addEventListener("keydown", (e) => {
   const steps = { ArrowUp: [-1, 0], ArrowDown: [1, 0], ArrowLeft: [0, -1], ArrowRight: [0, 1] };
   if (!(e.key in steps) || e.target.closest("input, select, textarea")) return;
+  // Mid-selection on the waterfall: moving on would drop the half-drawn shape.
+  if (document.querySelector('#waterfall .wf[data-drawing="1"]')) return;
   const current = cellFor(selected);
   const data = gridData();
   if (!current || !data) return;

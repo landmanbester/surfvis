@@ -19,6 +19,9 @@ import { dragRectangle } from "./select.mjs";
 export const DRAG_PX = 4;
 // A click this close to the first vertex closes the polygon.
 export const CLOSE_PX = 8;
+// A press this soon after, and this near, the click that closed a polygon is
+// the second half of a double-click on the first vertex, not a new gesture.
+export const DOUBLE_MS = 500;
 
 const dist = (a, b) => Math.hypot(a.x - b.x, a.y - b.y);
 
@@ -35,6 +38,7 @@ export class Selection {
     this.vertices = [];
     this.cursor = null; // {t, c, x, y}: the pointer, for the rubber band
     this.press = null; // where the button went down, until it comes up
+    this.closedBy = null; // {x, y, at}: the click that closed the polygon
   }
 
   // A closed selection, ready for confirmation (e.g. carried over from another baseline).
@@ -50,10 +54,14 @@ export class Selection {
     return dragRectangle(this.press, this.cursor, this.ntime, this.nchan);
   }
 
-  down(pt) {
+  // Returns false when the press is ignored (the rest of a double-click).
+  down(pt, now = Date.now()) {
+    const c = this.closedBy;
+    if (this.mode === "pending" && c && now - c.at < DOUBLE_MS && dist(c, pt) <= CLOSE_PX) return false;
     if (this.mode === "pending") this.clear(); // a new gesture replaces an unconfirmed one
     this.press = pt;
     this.cursor = pt;
+    return true;
   }
 
   move(pt) {
@@ -63,7 +71,7 @@ export class Selection {
 
   // Returns "pending" when a selection closed, "drawing" when a vertex was
   // added, null otherwise. toScreen maps (t, c) to {x, y} as currently drawn.
-  up(pt, toScreen) {
+  up(pt, toScreen, now = Date.now()) {
     const press = this.press;
     this.press = null;
     this.cursor = pt;
@@ -79,7 +87,11 @@ export class Selection {
     }
     if (this.mode === "drawing" && this.vertices.length >= 3) {
       const [t, c] = this.vertices[0];
-      if (dist(toScreen(t, c), pt) <= CLOSE_PX) return this.close();
+      if (dist(toScreen(t, c), pt) <= CLOSE_PX) {
+        this.close();
+        this.closedBy = { x: pt.x, y: pt.y, at: now };
+        return "pending";
+      }
     }
     this.vertices.push([pt.t, pt.c]);
     this.mode = "drawing";

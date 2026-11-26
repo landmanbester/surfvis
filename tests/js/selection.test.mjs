@@ -85,6 +85,25 @@ test("Backspace drops the last vertex; Esc cancels anything", () => {
   assert.equal(s.mode, "idle");
 });
 
+test("double-clicking the first vertex closes the polygon once and keeps it", () => {
+  const s = new Selection(10, 12);
+  for (const p of [at(1, 1), at(1, 6), at(5, 6)]) {
+    s.down(p, 0);
+    s.up(p, toScreen, 0);
+  }
+  s.down(at(1, 1), 1000);
+  assert.equal(s.up(at(1, 1), toScreen, 1000), "pending");
+  // The double-click's second press and the dblclick event change nothing.
+  assert.equal(s.down(at(1, 1), 1150), false);
+  assert.equal(s.up(at(1, 1), toScreen, 1150), null);
+  assert.equal(s.doubleClick(toScreen), null);
+  assert.equal(s.mode, "pending");
+  assert.equal(s.vertices.length, 3);
+  // A press later, or elsewhere, is a new gesture.
+  assert.equal(s.down(at(1, 1), 2000), true);
+  assert.equal(s.mode, "idle");
+});
+
 test("a new press replaces a pending selection", () => {
   const s = new Selection(10, 12);
   s.setPending([[0, 0], [0, 3], [3, 3]]);

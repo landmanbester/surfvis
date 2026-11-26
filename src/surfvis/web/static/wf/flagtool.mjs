@@ -55,6 +55,7 @@ export function attach(root, api) {
 
   let spans = null; // the pending selection's cells
   let dry = null; // the server's count for it
+  let uncountable = false; // no cells, or the dry run failed: nothing to confirm
   let dryFor = 0; // which dry run is the latest
   let busy = false; // a write in flight
   let backupReady = false;
@@ -74,6 +75,12 @@ export function attach(root, api) {
   // Data and screen coordinates of a pointer event.
   const point = (e) => ({ ...api.toData(e.offsetX, e.offsetY), x: e.offsetX, y: e.offsetY });
 
+  // While a polygon or rectangle is under way, the arrow keys must not swap
+  // the panel (and drop it): app.js checks this.
+  const markDrawing = () => {
+    root.dataset.drawing = sel.mode === "drawing" || sel.mode === "dragging" ? "1" : "";
+  };
+
   function body(extra = {}) {
     return {
       ...ctx,
@@ -84,7 +91,7 @@ export function attach(root, api) {
   }
 
   function refreshButtons() {
-    const pending = sel.mode === "pending" && !disabled;
+    const pending = sel.mode === "pending" && !disabled && !uncountable;
     applyBtn.hidden = !pending;
     if (pending) {
       applyBtn.textContent = dry ? confirmLabel(dry) : "Counting cells…";
@@ -102,28 +109,35 @@ export function attach(root, api) {
   async function onPending() {
     spans = rasterise(sel.vertices, view.ntime, view.nchan);
     dry = null;
+    uncountable = false;
     carried = { scan: scanKey(ctx), vertices: sel.vertices.map((v) => [...v]) };
+    const id = ++dryFor;
+    if (!spans.length) {
+      uncountable = true;
+      say("The selection covers no cells.");
+    }
     refreshButtons();
     api.redraw();
-    if (!spans.length) {
-      say("The selection covers no cells.");
-      return;
-    }
-    const id = ++dryFor;
+    if (uncountable) return;
     try {
       const out = await postJSON("/flag", body({ dry_run: true }));
       if (id !== dryFor || sel.mode !== "pending") return;
       dry = out;
       say(backupReady ? "Enter to flag, Esc to cancel." : "");
     } catch (err) {
-      if (id === dryFor) say(err.message, true);
+      if (id !== dryFor) return;
+      uncountable = true;
+      say(err.message, true);
     }
     refreshButtons();
   }
 
+  // The pending selection was discarded (Esc, or a new gesture over it).
   function onCleared() {
     spans = null;
     dry = null;
+    uncountable = false;
+    carried = null;
     dryFor++;
     refreshButtons();
     api.redraw();
@@ -167,6 +181,8 @@ export function attach(root, api) {
     } finally {
       busy = false;
       await loadState();
+      // The undo may have unflagged cells a pending selection covers: count again.
+      if (sel.mode === "pending") onPending();
     }
   }
 
@@ -248,10 +264,14 @@ export function attach(root, api) {
     (e) => {
       if (disabled || busy || !ours(e) || !api.inPlot(e.offsetX, e.offsetY)) return;
       e.preventDefault();
+      // preventDefault keeps focus where it was; a focused control would
+      // swallow Enter, Esc and Ctrl-Z, so the canvas press takes it away.
+      if (document.activeElement instanceof HTMLElement) document.activeElement.blur();
       canvas.setPointerCapture(e.pointerId);
       const wasPending = sel.mode === "pending";
-      sel.down(point(e));
+      if (!sel.down(point(e))) return; // the second press of a double-click that closed it
       if (wasPending) onCleared();
+      markDrawing();
     },
     { signal: life },
   );
@@ -270,6 +290,7 @@ export function attach(root, api) {
       if (!sel.press || e.button !== 0) return;
       const what = sel.up(point(e), api.toScreen);
       if (what === "pending") onPending();
+      markDrawing();
       api.redraw();
     },
     { signal: life },
@@ -289,30 +310,50 @@ export function attach(root, api) {
     (e) => {
       if (!root.isConnected || e.target.closest("input, select, textarea, button")) return;
       if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "z" && !e.shiftKey) {
-        if (sel.mode === "drawing" || sel.mode === "dragging") return;
+        if (e.repeat || sel.mode === "drawing" || sel.mode === "dragging") return;
         e.preventDefault();
         undo();
         return;
       }
+      // Never act on auto-repeat: holding Enter would close a selection and,
+      // once its count arrived, apply it. Modified keys are someone else's.
+      if (e.repeat || e.shiftKey || e.ctrlKey || e.metaKey || e.altKey) return;
       const what = sel.key(e.key);
       if (!what) return;
       e.preventDefault();
       if (what === "pending") onPending();
       else if (what === "apply") apply();
       else if (what === "cleared") {
-        carried = null;
         onCleared();
         say("");
       }
+      markDrawing();
       api.redraw();
     },
     { signal: life },
   );
-  applyBtn.addEventListener("click", apply, { signal: life });
-  undoBtn.addEventListener("click", undo, { signal: life });
+  // Controls give focus back after a click, so Enter and Esc keep reaching
+  // the selection (and Enter cannot also click a focused button).
+  applyBtn.addEventListener(
+    "click",
+    () => {
+      applyBtn.blur();
+      apply();
+    },
+    { signal: life },
+  );
+  undoBtn.addEventListener(
+    "click",
+    () => {
+      undoBtn.blur();
+      undo();
+    },
+    { signal: life },
+  );
   allCorr.addEventListener(
     "change",
     () => {
+      allCorr.blur();
       if (sel.mode === "pending") onPending();
     },
     { signal: life },

@@ -712,7 +712,8 @@ class Flagger:
             edit = self.edits[-1]
             if edit_id is not None and edit_id != edit.id:
                 raise StaleUndoError(
-                    f"Edit {edit_id} is no longer the most recent; the latest is edit {edit.id} ({edit.description})"
+                    f"That edit is no longer the most recent: {edit.description} "
+                    f"({edit.newly_flagged} cells) was flagged since, perhaps in another tab"
                 )
             try:
                 self._write(edit, on=False)

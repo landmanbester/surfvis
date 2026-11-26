@@ -316,12 +316,14 @@ export async function mount(root) {
   canvas.addEventListener("pointerleave", () => {
     readout.textContent = help;
   });
-  root.querySelector(".wf-reset").addEventListener("click", () => {
+  root.querySelector(".wf-reset").addEventListener("click", (e) => {
+    e.currentTarget.blur(); // a focused button would take the selection's Enter
     view.reset();
     draw();
     scheduleRefine();
   });
-  root.querySelector(".wf-flags").addEventListener("change", () => {
+  root.querySelector(".wf-flags").addEventListener("change", (e) => {
+    e.currentTarget.blur();
     if (block) setBlock(block);
     draw();
   });

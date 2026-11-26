@@ -270,7 +270,7 @@ def test_undo_reverts_only_the_edit_it_names(chi2_zarr, writable_ms):
     after_both, _ = _flags(writable_ms)
 
     stale = client.post("/flag/undo", json={"id": first["id"]})
-    assert stale.status_code == 409 and str(second["id"]) in stale.json()["detail"]
+    assert stale.status_code == 409 and second["description"] in stale.json()["detail"]
     np.testing.assert_array_equal(_flags(writable_ms)[0], after_both)
     assert client.post("/flag/undo").status_code == 422  # the id is required
 
@@ -335,7 +335,7 @@ def test_the_panel_offers_flagging_only_when_allowed(chi2_zarr, writable_ms):
 
     url = "/waterfall?field=0&spw=0&scan=1&c=XX&p=2&q=0&column=RESIDUAL"
     readonly = TestClient(create_app(chi2_zarr["zarr"], ms=writable_ms)).get(url).text
-    assert "data-flag" not in readonly and "wf-apply" not in readonly and "Ctrl-Z" not in readonly
+    assert "data-flag" not in readonly and "wf-apply" not in readonly and "Cmd-Z" not in readonly
 
     client = TestClient(create_app(chi2_zarr["zarr"], ms=writable_ms, allow_flagging=True))
     panel = client.get(url + "&flagversion=").text
