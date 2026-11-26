@@ -49,7 +49,7 @@ docker run --rm --user "$(id -u):$(id -g)" -e HOME=/tmp -v "$PWD":/src -w /src \
    PYTHONPATH=/tmp/t:/src/src:/src /tmp/t/bin/pytest tests/ -q -W ignore"
 ```
 
-That is the only way to run the full suite (109 tests; the node one skips in the container). **CI does not run them** —
+That is the only way to run the full suite (115 tests; the node one skips in the container). **CI does not run them** —
 `.github/workflows/ci.yml` installs the lightweight package only, deliberately,
 since python-casacore and numba make CI slow and brittle. Verify locally.
 
@@ -294,8 +294,13 @@ built on the `flagging` branch, stacked on `serve-ui`. The write path is
 `web/flagging.py`: selections are polygons in (time slot, channel), rasterised
 on the server by cell centre and even-odd; writes need `serve
 --allow-flagging`, save FLAG as a CASA flag version before the first write, and
-keep an undo stack. Next is a canvas-drawn waterfall with polygon and
-drag-rectangle selection. Any new write to the MS goes through `Flagger`.
+keep an undo stack. The canvas draws selections (`static/wf/selection.mjs`
+for the gestures, `select.mjs` for the cell rule, `flagtool.mjs` for the
+wiring); `select.mjs` must agree with `flagging.rasterise` cell for cell,
+which `tests/js/rasterise_cases.json` pins. No single key press or gesture
+may both close a selection and write it. Next is step 4 of #16: wider
+scopes, the audit log, marking the heatmap stale. Any new write to the MS
+goes through `Flagger`.
 
 ## Agent skills
 

@@ -4,7 +4,7 @@ title: Chi-squared browser
 description: How surfvis serve links surfchi2 output to on-demand baseline waterfalls, the waterfall's correction / Stokes / flag-version controls, and the xarray-ms facts it depends on.
 tags: [web, fastapi, htmx, xarray-ms, zarr]
 timestamp: 2026-11-26
-last_verified_commit: 2199c48
+last_verified_commit: 2497dec
 ---
 
 # Chi-squared browser
@@ -268,9 +268,9 @@ The selected cell keeps an outline (`.selected`) across heatmap re-renders.
 
 ## Manual flagging (write path)
 
-Design: issue #16. Source: `web/flagging.py`, the `/flag*` routes in `app.py`.
-The canvas waterfall is in place, but it has no selection tool yet (step 3 of
-#16), so the routes are driven by JSON.
+Design: issue #16. Source: `web/flagging.py`, the `/flag*` routes in `app.py`,
+and the selection tool in `static/wf/` (see "Selection on the canvas"). Terms
+(selection, pending selection, edit, scope, backup) are in `GLOSSARY.md`.
 
 - **Selections are polygons** in the waterfall's (time slot, channel) data
   coordinates; a rectangle is four vertices. `rasterise` selects a cell when
@@ -514,12 +514,56 @@ and calls `mount(root)`.
   vmax, quantity, colormap, title, rect) followed by float32 values and uint8
   flag fractions; decoded by `static/wf/format.mjs`.
 - **Modules** (`static/wf/`, node-tested via `tests/test_js.py`): `format`,
-  `luts`, `colormap` (paint), `view` (View, Latest, niceTicks, wheelFactor), `widget`.
+  `luts`, `colormap` (paint), `view` (View, Latest, niceTicks, wheelFactor),
+  `widget`, and for flagging `select` (rasterise, dragRectangle),
+  `selection` (the gesture state machine) and `flagtool` (DOM wiring, not
+  node-tested).
 - **Interactions:** wheel zooms about the cursor, shift-drag or middle-drag
   pans, `0` or Reset view resets, hover reads time, frequency, value and flag
   percentage. After 150 ms of rest the visible window is refetched at screen
   resolution; `Latest` discards stale responses. "show flags" repaints locally.
-  Plain left-drag and click are unbound, reserved for flagging polygons.
+  Plain left-drag and click belong to the selection tool (below), and only
+  exist with `--allow-flagging`.
+
+### Selection on the canvas
+
+Step 3 of #16. With `--allow-flagging` the panel carries `data-flag` (the
+JSON `/flag` needs: field, spw, scan, p, q, product, gtable, flagversion) and
+`data-names`, and `widget.mjs` imports `flagtool.mjs`.
+
+- **Gestures** (`selection.mjs`, plain left button only): drag makes a
+  rectangle snapped outwards to the cells it touched (`dragRectangle`); clicks
+  add polygon vertices; clicking the first vertex (8 px), double-clicking or
+  Enter closes it. A closed shape is a **pending selection**; only a second
+  Enter or the button applies it. Backspace drops a vertex, Esc cancels, a
+  new press replaces a pending selection -- except the second press of a
+  double-click on the first vertex (500 ms, 8 px), which once threw away the
+  polygon it had just closed.
+- **Never one key press from drawing to writing.** Key auto-repeat (`e.repeat`)
+  and modified keys are ignored: holding Enter used to close a polygon and,
+  once its count arrived, apply it. A canvas press blurs the focused control
+  (pointerdown's `preventDefault` otherwise left focus on, say, the
+  checkbox, which swallowed Enter and Esc), and buttons blur after a click,
+  so Enter cannot also click a focused button.
+- **Preview and count.** `select.mjs::rasterise` is a port of the server's
+  rule returning row spans (a full mask is 15 MB at 32k channels); the same
+  expression in the same order, pinned by 206 cases Python writes to
+  `tests/js/rasterise_cases.json` (thirds, tenths and integers nudged by
+  1e-3 catch a reordered interpolation, which plain integer cases did not).
+  Counts come from a `/flag` dry run, which also returns the correlation
+  names for the label. No cells, or a failed count, leaves nothing to
+  confirm. Changing "all correlations" or undoing re-counts.
+- **After apply or undo** the waterfall re-fetches in place (`api.reload`),
+  keeping zoom and colours; an undo of another baseline only reports.
+- **Carrying.** A pending selection is module state in `flagtool.mjs`, carried
+  to the next panel of the same (field, spw, scan) and shown pending there
+  (with a fresh count); it is kept after an apply, so arrow, Enter, arrow,
+  Enter flags one patch across baselines. Esc or a new gesture discards it;
+  a new scan drops it. While a shape is being drawn the panel has
+  `data-drawing="1"` and `app.js` ignores the arrow keys.
+- **Disabled** while the flags menu shows a saved version (and the server
+  refuses such requests); confirming waits for the backup, polled from
+  `/flag/state` every 3 s.
   Layers added through `api.addLayer(fn)` draw clipped to the plot area.
 - **Cache:** static files are served `Cache-Control: no-cache`
   (`RevalidatedStaticFiles`), because imports between ES modules cannot carry

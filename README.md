@@ -379,11 +379,25 @@ select a compatible subset.
 `surfvis flag-chi2` writes to the flag column of the MS you give it. There is
 no dry-run.
 
-`surfvis serve` is read-only unless started with `--allow-flagging`. Manual
-flagging from the waterfall is in progress
-([#16](https://github.com/ratt-ru/surfvis/issues/16)): the server side exists,
-the selection tool in the page does not yet. Before its first write, a
-flagging session saves FLAG as a CASA flag version named
+`surfvis serve` is read-only unless started with `--allow-flagging`. With it,
+you can flag by hand on a baseline's waterfall
+([#16](https://github.com/ratt-ru/surfvis/issues/16)):
+
+| Do | To |
+|---|---|
+| drag | select a rectangle of cells |
+| click, click, click... | draw a polygon; click its first vertex, double-click or press Enter to close it |
+| Backspace / Esc | drop the last vertex / cancel |
+| Enter, or the Flag button | flag the pending selection, after reading how many new cells it covers |
+| Ctrl/Cmd-Z, or the Undo button | undo the latest edit, which the button names |
+
+A closed selection is only shaded and counted; nothing is written until you
+confirm it. "All correlations" (on by default) flags every correlation of the
+baseline; untick it to flag only those the plotted product is formed from. A
+pending selection follows you to the next baseline of the same scan, so one
+patch of RFI can be flagged across baselines with the arrow keys and Enter.
+Drawing is disabled while the flags menu shows a saved flag version. Before
+its first write, a flagging session saves FLAG as a CASA flag version named
 `surfvis_before_<UTC timestamp>`, so `flagmanager` (or the flags menu) can
 restore it.
 

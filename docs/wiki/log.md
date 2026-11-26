@@ -3,10 +3,18 @@ type: log
 title: Wiki changelog
 description: Chronological record of what changed in the wiki and why.
 timestamp: 2026-11-26
-last_verified_commit: 2199c48
+last_verified_commit: 2497dec
 ---
 
 # Wiki changelog
+
+## 2026-11-26 — selection on the canvas (verified at `2497dec`)
+
+- **web-app.md:** step 3 of #16: drawing, previewing, confirming and undoing
+  selections on the canvas; the `/flag` contract with the panel's settings,
+  all correlations by default, and undo by edit id; the review findings
+  that shaped it (key auto-repeat, focus, double-click on the first vertex,
+  near-tie rasteriser cases). `GLOSSARY.md` holds the flagging terms.
 
 ## 2026-11-26 — crash-safe flag writes (verified at `2199c48`)
 
