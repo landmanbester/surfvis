@@ -3,10 +3,17 @@ type: log
 title: Wiki changelog
 description: Chronological record of what changed in the wiki and why.
 timestamp: 2026-11-26
-last_verified_commit: 33069db
+last_verified_commit: ebd836a
 ---
 
 # Wiki changelog
+
+## 2026-11-26 — flag writes keep the open scan; MSv2 names on screen (verified at `ebd836a`)
+
+- **web-app.md:** FLAG is read by row on every request and never cached, so
+  a flag write, undo or flag-version switch costs one FLAG read instead of a
+  24 s partition rebuild (`msdata.writing`); the plane cache is keyed on a
+  generation and holds no FLAG; menus and titles use MSv2 column names.
 
 ## 2026-11-26 — checked against a live server on com08 (verified at `33069db`)
 

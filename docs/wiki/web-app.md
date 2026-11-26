@@ -4,7 +4,7 @@ title: Chi-squared browser
 description: How surfvis serve links surfchi2 output to on-demand baseline waterfalls, the waterfall's correction / Stokes / flag-version controls, and the xarray-ms facts it depends on.
 tags: [web, fastapi, htmx, xarray-ms, zarr]
 timestamp: 2026-11-26
-last_verified_commit: 33069db
+last_verified_commit: ebd836a
 ---
 
 # Chi-squared browser
@@ -82,12 +82,13 @@ Verified against the `0.4.0a*` line pinned in `pyproject.toml` (see
   boolean filtering over `scan_name`.
 - **xarray-ms is pinned to a commit of its `write-support` branch**
   (`0.4.0-alpha.16`, unreleased); see CLAUDE.md for why and when to unpin.
-- **Column names are MSv4.** xarray-ms's standard data groups are `base`
+- **Column names are MSv4 inside, MSv2 on screen.** xarray-ms's standard data groups are `base`
   (`DATA` → `VISIBILITY`), `corrected` (`CORRECTED_DATA` →
   `VISIBILITY_CORRECTED`) and `model` (`MODEL_DATA` → `VISIBILITY_MODEL`),
   all sharing `WEIGHT` (from `WEIGHT_SPECTRUM`) and `FLAG`.
   `DataGroup.resolve()` translates those MSv2 names and passes everything else
-  through, so both spellings work in the UI. It must never map
+  through, so both spellings work on a URL; `msdata.msv2_name()` translates
+  back for the menus (`available_columns`) and the plot title. It must never map
   `CORRECTED_DATA` to `VISIBILITY`: it once did, and choosing
   `CORRECTED_DATA` plotted `DATA`.
 - **The data groups are constants; never open the datatree to learn them.**
@@ -135,8 +136,8 @@ at MeerKAT scale is far too much to read per click.
 
 The plotted quantity is `inv(G_p) column inv(G_q)^H - model` formed into the
 product, via `utils/products.form` -- the same function `chi2` uses, so the two
-cannot drift apart. `chi2`'s recorded `DATA` is resolved to `VISIBILITY` before
-it reaches the menus, or the column would be listed twice.
+cannot drift apart. The menus list MSv2 names, as `chi2` records them; a
+column given by its MSv4 name is translated back, so it is never listed twice.
 
 - **Gain table** is a menu, not free text: the term `chi2` used (the zarr's
   `gtable` attr), any passed as `serve --gtable` (repeatable), and the terms in
@@ -314,10 +315,15 @@ The canvas waterfall is in place, but it has no selection tool yet (step 3 of
   baseline-scan. A write that fails half-way is put back before the error is
   raised. The stack is per process; the backup version is the durable
   fallback. `GET /flag/state` lists the edits.
-- After a write `msdata.invalidate(ms)` drops the caches, so the next
-  waterfall shows the new flags even within one mtime tick. Writes go through
-  a separate arcae handle in the same process as xarray-ms's read handle;
-  casacore shares the underlying table, and the tests confirm reads see writes.
+- A write is wrapped in `msdata.writing(ms)` and clears nothing: no cache
+  holds FLAG (see "Plane cache"), so the next waterfall reads the new flags
+  by row (about 0.03 s on com08) and keeps the open partition and the cached
+  plane. On exit `writing` records the MS's new storage fingerprint as seen,
+  so `_open` does not take the write for another program's rewrite and
+  rebuild the scan (it did, 24 s per edit on the ESO137-006 MS). If the
+  fingerprint had already moved before the write, that change is left for
+  `_open` to find. `_open`'s fingerprint check takes the same lock, so a
+  request never sees a half-done write of ours.
 - `Flagger` serialises apply/undo with a lock: FastAPI runs sync routes in a
   thread pool.
 
@@ -363,7 +369,7 @@ Second round, same MS (10.9 M rows, 64 antennas, 9 secondary columns):
 | 37 s per scan | `open_partition`: 22.6 s building xarray-ms's structure (once per MS; 15 s of it partitioning the rows), 14.4 s `secondary_variables` row-shape `np.unique` per column (every scan) | hidden: `/heatmap` warms its scan in the background |
 
 **Scan rows** are keyed on `table.dat`'s mtime and size, not the storage
-fingerprint, and `invalidate()` leaves them: a FLAG write does not move rows.
+fingerprint, and `invalidate()` leaves them: rows only move when `table.dat` does.
 
 **Warm-up.** `/heatmap` calls `msdata.warm()`: one worker thread opens the
 partition and reads its scan rows while the heatmap is on screen. Only the
@@ -398,10 +404,11 @@ baseline over a scan touches thousands of tiles to return 3.7 MB. The
 warm-up costs 23.7 s to open the first partition (xarray-ms's structure, once
 per MS) and 9.4 s for the scan's row query.
 
-**Still open:** `invalidate()` (called by the flagger after every write)
-clears xarray-ms's multiton, so the next waterfall rebuilds its structure and
-reopens the scan -- about 24 s on that MS. Step 3's flag-and-redraw
-loop needs that fixed first.
+**Flag writes no longer reopen.** The flagger used to call `invalidate()`
+after every write, which cleared xarray-ms's multiton, so the next waterfall
+rebuilt its structure and reopened the scan -- about 24 s on that MS. Now a
+write, an undo or a switch of flag version costs one FLAG read for the
+baseline: 0.03 s warm, 0.23 s cold, plus 0.01 s to open the table (com08).
 
 ## Colour scaling
 
@@ -480,17 +487,22 @@ and calls `mount(root)`.
 
 `msdata.cached_plane` keeps the last four formed baseline planes (an `lru_cache`)
 so zooming and panning re-slice memory instead of re-reading the MS. The key is
-the MS fingerprint (storage mtimes), the gain term's mtime, and the baseline and
-settings (field, spw, scan, antennas, product, column, model, gtable, flag
-version). The antennas are put in xarray-ms's order first (`view_order`), so
+the MS's generation (bumped by `_open` when the storage fingerprint moves for a
+reason other than our own flag write), the gain term's mtime, and the baseline and
+settings (field, spw, scan, antennas, product, column, model, gtable). **FLAG is
+not in the entry.** The entry's flags are only what the data implies (grid gaps,
+gain flags); every call reads FLAG, or the flag version, by row and ORs it in.
+That is exact: `products.form` flags a product wherever any correlation it
+reads is flagged, and the plane's values do not depend on flags. The antennas are put in xarray-ms's order first (`view_order`), so
 the two mirrored cells of the heatmap share an entry: keyed on the clicked
 order, the second cell re-read the MS (5.8 s on com08). It is **not** keyed on quantity or on the heatmap's product, so
 another quantity, or the same baseline reached from another heatmap, hits the
-cache. `invalidate(ms)` clears it (the flagger
-calls it after a write). An entry holds the plane as complex64 and the flags as
+cache, and so does a flag edit or another flag version. `invalidate(ms)` clears
+it, for data-column rewrites. An entry holds the plane as complex64 and the flags as
 bool, `values` is dropped: about 9 bytes per cell, so 450 x 32768 is ~130 MB and
-four entries ~0.5 GB. Colour limits are cached per quantity on the entry
-(`Waterfall.limits`), so colours do not move on zoom and are not recomputed.
+four entries ~0.5 GB. Colour limits are cached per quantity and flag version on
+the entry (`Waterfall.limits`), so colours do not move on zoom or on a flag
+edit (the edit is what changes on screen), and are not recomputed.
 
 Concurrent misses for the same plane (two tabs, a quick double click) wait on
 a per-key lock (`_Coalescer`) for the first read rather than each reading the MS;
