@@ -387,9 +387,20 @@ for FixedShape columns: with 0.5.14, which carries the same code, the reopen
 took 0.06 s and the first open 23.1 s instead of 48.2 s. surfvis now pins the
 write-support commit that carries it.
 
+**What a waterfall costs now** (com08, ESO137-006, profiled 2026-11-26): a
+plane-cache hit 26 ms; a new baseline in a warmed scan about 5.8 s, all of it
+the two complex column reads (about 2.9 s each; FLAG 0.05 s); changing
+model, flag version or product about 2.7-3 s (one read). The reads are slow
+because of the MS's tiling, not surfvis: `CORRECTED_DATA` is a
+`TiledColumnStMan` with tiles of 2 corr x 16 chan x 4096 rows (1 MB),
+`MODEL_DATA` 2 x 2 x 4096, and one baseline's rows are 2016 rows apart, so a
+baseline over a scan touches thousands of tiles to return 3.7 MB. The
+warm-up costs 23.7 s to open the first partition (xarray-ms's structure, once
+per MS) and 9.4 s for the scan's row query.
+
 **Still open:** `invalidate()` (called by the flagger after every write)
 clears xarray-ms's multiton, so the next waterfall rebuilds its structure and
-reopens the scan -- tens of seconds on a large MS. Step 3's flag-and-redraw
+reopens the scan -- about 24 s on that MS. Step 3's flag-and-redraw
 loop needs that fixed first.
 
 ## Colour scaling
@@ -471,7 +482,9 @@ and calls `mount(root)`.
 so zooming and panning re-slice memory instead of re-reading the MS. The key is
 the MS fingerprint (storage mtimes), the gain term's mtime, and the baseline and
 settings (field, spw, scan, antennas, product, column, model, gtable, flag
-version). It is **not** keyed on quantity or on the heatmap's product, so
+version). The antennas are put in xarray-ms's order first (`view_order`), so
+the two mirrored cells of the heatmap share an entry: keyed on the clicked
+order, the second cell re-read the MS (5.8 s on com08). It is **not** keyed on quantity or on the heatmap's product, so
 another quantity, or the same baseline reached from another heatmap, hits the
 cache. `invalidate(ms)` clears it (the flagger
 calls it after a write). An entry holds the plane as complex64 and the flags as

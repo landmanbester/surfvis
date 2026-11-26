@@ -855,7 +855,11 @@ def cached_plane(
     and the chunk rectangle are not part of the key. The entry is slimmed to
     save memory: ``plane`` is complex64 and ``values`` is None, so use
     ``plane``; ``rect`` is None.
+
+    Keyed on the baseline as xarray-ms presents it, so the two cells of the
+    symmetric heatmap share one entry instead of each reading the MS.
     """
+    name1, name2 = view_order(_open(ms, field, spw, scan), name1, name2)
     key = (ms, field, spw, scan, name1, name2, product, column, model, gtable, flagversion)
     with _PLANES.hold(key, "cached_plane"):
         return _cached_plane(

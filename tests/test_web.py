@@ -717,6 +717,9 @@ def test_plane_cache_reuses_and_invalidates(chi2_zarr, monkeypatch):
     a = msdata.cached_plane(ms, 0, 0, 1, names[0], names[2], "XX", "RESIDUAL")
     b = msdata.cached_plane(ms, 0, 0, 1, names[0], names[2], "XX", "RESIDUAL")
     assert a is b and len(calls) == 1
+    # The heatmap is symmetric: clicking the other cell is the same baseline, not a 6 s re-read.
+    assert msdata.cached_plane(ms, 0, 0, 1, names[2], names[0], "XX", "RESIDUAL") is a
+    assert len(calls) == 1
     assert np.iscomplexobj(a.plane) and a.plane.shape == a.flags.shape == (12, 32)
     assert a.freqs.shape == (32,) and a.times.shape == (12,)
 
