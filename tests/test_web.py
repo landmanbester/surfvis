@@ -166,7 +166,8 @@ def test_residual_is_plottable_but_flag_is_not(chi2_zarr):
 
     columns = msdata.available_columns(chi2_zarr["ms"]["path"], 0, 0, 1)
     assert "RESIDUAL" in columns
-    assert "VISIBILITY" in columns
+    # Listed by the MSv2 names people know, not xarray-ms's.
+    assert "DATA" in columns and "VISIBILITY" not in columns
     assert "FLAG" not in columns
 
 
@@ -189,6 +190,9 @@ def test_msv2_column_names_resolve_to_msv4(chi2_zarr):
     assert group.resolve("MODEL_DATA") == "VISIBILITY_MODEL"
     # MSv4 names pass through, so resolving twice is harmless.
     assert group.resolve("VISIBILITY_MODEL") == "VISIBILITY_MODEL"
+    # And back, for menus and titles.
+    assert msdata.msv2_name("VISIBILITY_CORRECTED") == "CORRECTED_DATA"
+    assert msdata.msv2_name("RESIDUAL") == "RESIDUAL"
     assert msdata.data_group(chi2_zarr["ms"]["path"], "corrected").correlated_data == "VISIBILITY_CORRECTED"
 
 
@@ -199,7 +203,9 @@ def test_data_column_is_plottable_by_its_msv2_name(chi2_zarr):
 
     names = chi2_zarr["ms"]["antenna_names"]
     wf = msdata.waterfall(chi2_zarr["ms"]["path"], 0, 0, 1, names[0], names[1], "XX", "DATA")
-    assert wf.column == "VISIBILITY"
+    assert wf.column == "DATA"
+    by_msv4 = msdata.waterfall(chi2_zarr["ms"]["path"], 0, 0, 1, names[0], names[1], "XX", "VISIBILITY")
+    np.testing.assert_array_equal(by_msv4.values, wf.values)
 
 
 @needs_web
@@ -527,9 +533,9 @@ def test_corrected_data_is_its_own_column(chi2_zarr):
     names = chi2_zarr["ms"]["antenna_names"]
     data = msdata.waterfall(ms, 0, 0, 1, names[0], names[1], "XX", "DATA")
     corrected = msdata.waterfall(ms, 0, 0, 1, names[0], names[1], "XX", "CORRECTED_DATA")
-    assert corrected.column == "VISIBILITY_CORRECTED"
+    assert corrected.column == "CORRECTED_DATA"
     assert not np.allclose(data.values, corrected.values)
-    assert "VISIBILITY_CORRECTED" in msdata.available_columns(ms, 0, 0, 1)
+    assert "CORRECTED_DATA" in msdata.available_columns(ms, 0, 0, 1)
 
 
 @needs_web
@@ -550,7 +556,7 @@ def test_waterfall_forms_the_corrected_residual(chi2_zarr, gain_table, quantity)
     want = (raw.values + 1j * raw_i.values) / (g[:, :, p, 0] * np.conj(g[:, :, q, 0]))
     want = want.real if quantity == "real" else want.imag
     np.testing.assert_allclose(formed.values, want, atol=1e-4)
-    assert formed.column == "corrected VISIBILITY - VISIBILITY_MODEL"
+    assert formed.column == "corrected DATA - MODEL_DATA"
 
 
 @needs_web
@@ -673,17 +679,17 @@ def test_waterfall_controls(chi2_corrected):
     panel = client.get(base)
     assert panel.status_code == 200
     assert f'value="{chi2_corrected["gtable"]}"' in panel.text
-    assert '<option value="VISIBILITY_MODEL" selected>' in panel.text
-    # chi2 recorded DATA; the menu knows it as VISIBILITY and must not list both.
-    assert '<option value="VISIBILITY" selected>' in panel.text
-    assert 'value="DATA"' not in panel.text
+    assert '<option value="MODEL_DATA" selected>' in panel.text
+    # The menus speak MSv2, as chi2 does, and do not list a column twice.
+    assert '<option value="DATA" selected>' in panel.text
+    assert "VISIBILITY" not in panel.text
     assert (
         'name="model"' in panel.text
-        and '<option value="WEIGHT"' not in panel.text.split('name="model"')[1].split("</select>")[0]
+        and '<option value="WEIGHT' not in panel.text.split('name="model"')[1].split("</select>")[0]
     )
     assert "no longer shows" not in panel.text
     # The column is corrected and has a model subtracted, so WEIGHT is not offered.
-    assert '<option value="WEIGHT"' not in panel.text
+    assert '<option value="WEIGHT' not in panel.text
     assert 'data-src="/waterfall.bin?' in panel.text and "<canvas" in panel.text
     assert 'class="keep"' not in panel.text
 
@@ -711,14 +717,14 @@ def test_plane_cache_reuses_and_invalidates(chi2_zarr, monkeypatch):
     names = chi2_zarr["ms"]["antenna_names"]
     msdata.invalidate(ms)
     calls = []
-    real = msdata.waterfall
-    monkeypatch.setattr(msdata, "waterfall", lambda *a, **k: calls.append(1) or real(*a, **k))
+    real = msdata._formed
+    monkeypatch.setattr(msdata, "_formed", lambda *a, **k: calls.append(1) or real(*a, **k))
 
     a = msdata.cached_plane(ms, 0, 0, 1, names[0], names[2], "XX", "RESIDUAL")
     b = msdata.cached_plane(ms, 0, 0, 1, names[0], names[2], "XX", "RESIDUAL")
-    assert a is b and len(calls) == 1
+    assert a.plane is b.plane and a.limits is b.limits and len(calls) == 1
     # The heatmap is symmetric: clicking the other cell is the same baseline, not a 6 s re-read.
-    assert msdata.cached_plane(ms, 0, 0, 1, names[2], names[0], "XX", "RESIDUAL") is a
+    assert msdata.cached_plane(ms, 0, 0, 1, names[2], names[0], "XX", "RESIDUAL").plane is a.plane
     assert len(calls) == 1
     assert np.iscomplexobj(a.plane) and a.plane.shape == a.flags.shape == (12, 32)
     assert a.freqs.shape == (32,) and a.times.shape == (12,)
@@ -796,8 +802,8 @@ def test_waterfall_bin_reads_the_ms_once_across_heatmaps(chi2_zarr, monkeypatch)
 
     msdata.invalidate(chi2_zarr["ms"]["path"])
     calls = []
-    real = msdata.waterfall
-    monkeypatch.setattr(msdata, "waterfall", lambda *a, **k: calls.append(1) or real(*a, **k))
+    real = msdata._formed
+    monkeypatch.setattr(msdata, "_formed", lambda *a, **k: calls.append(1) or real(*a, **k))
     client = TestClient(create_app(chi2_zarr["zarr"]))
     base = "/waterfall.bin?field=0&spw=0&scan=1&p=1&q=5&product=XX&column=RESIDUAL"
 
@@ -838,7 +844,7 @@ def test_profile_reports_where_a_request_spent_its_time(chi2_zarr, tmp_path, mon
     (record,) = [json.loads(line) for line in (out / "spans.jsonl").read_text().splitlines()]
     names = [s["name"] for s in record["spans"]]
     assert record["path"] == "/waterfall.bin" and record["status"] == 200
-    assert "waterfall" in names and "read flags" in names
+    assert "cached_plane: miss" in names and "read flags" in names
     # Nested: the MS read happens inside the cache miss.
     depth = {s["name"]: s["depth"] for s in record["spans"]}
     assert depth["read RESIDUAL"] > depth["cached_plane: miss"]

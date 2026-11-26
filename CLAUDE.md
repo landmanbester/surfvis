@@ -49,7 +49,7 @@ docker run --rm --user "$(id -u):$(id -g)" -e HOME=/tmp -v "$PWD":/src -w /src \
    PYTHONPATH=/tmp/t:/src/src:/src /tmp/t/bin/pytest tests/ -q -W ignore"
 ```
 
-That is the only way to run the full suite (106 tests; the node one skips in the container). **CI does not run them** —
+That is the only way to run the full suite (107 tests; the node one skips in the container). **CI does not run them** —
 `.github/workflows/ci.yml` installs the lightweight package only, deliberately,
 since python-casacore and numba make CI slow and brittle. Verify locally.
 
@@ -153,7 +153,9 @@ intermittent hang.
 **never open the datatree to learn them**: that opens every partition, over
 ten minutes on a real MS before the first waterfall. Columns outside the MSv2
 standard (`RESIDUAL`) are not renamed. Mapping `CORRECTED_DATA` to
-`VISIBILITY` (as `DataGroup.resolve` once did) silently plots `DATA`.
+`VISIBILITY` (as `DataGroup.resolve` once did) silently plots `DATA`. The
+other direction, `msdata.msv2_name`, is what menus and titles show: the UI
+speaks MSv2.
 
 **Baselines are presented upper-triangular.** xarray-ms converts a row stored
 as `ANTENNA1 > ANTENNA2` on read (conjugated, cross-hands swapped), so gains,
@@ -204,6 +206,15 @@ the MSv4 view unless `FEED` (validated against ANTENNA1/2), `STATE`, and the
 **The canvas waterfall's plane cache is memory-heavy.** `msdata.cached_plane`
 keeps four planes at ~9 bytes per cell (complex64 + flags), so 450 x 32768 is
 ~130 MB each; keep it complex64 and never cache `values`.
+
+**Nothing cached may hold FLAG.** `msdata._baseline_flags` reads FLAG (or a
+flag version) by row with arcae on every request; cached planes hold only the
+values and the flags the data implies (gaps, gains), and `_with_flags` ORs FLAG
+in, which is exact because `products.form` flags a product wherever any
+correlation it reads is flagged. That is what lets a `Flagger` write, wrapped
+in `msdata.writing(ms)`, cost one FLAG read to show instead of a partition
+rebuild (25 s per scan on a MeerKAT MS). `invalidate()` is for data-column
+rewrites only; never call it after a flag write.
 
 **`serve` opens only the gain tables it offers.** It has no authentication,
 so `gtable` in a query string must not name arbitrary paths: the term `chi2`

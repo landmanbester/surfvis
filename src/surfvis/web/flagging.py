@@ -17,6 +17,7 @@ Design and plan: https://github.com/ratt-ru/surfvis/issues/16
 
 import os
 import threading
+from contextlib import nullcontext
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 
@@ -285,56 +286,56 @@ class Flagger:
 
             import arcae
 
-            table = arcae.table(self.ms, readonly=dry_run)
-            try:
-                flag = np.asarray(table.getcol("FLAG", index=(rows,)), dtype=bool)
-                flag_row = np.asarray(table.getcol("FLAG_ROW", index=(rows,)), dtype=bool)
-                # (row, channel) cells to set, broadcast over the chosen correlations.
-                cells = np.zeros(flag.shape, dtype=bool)
-                cells[..., corr_idx] = mask[slot][..., None]
-                if flipped.any():
-                    # corr_idx is in the waterfall's order; a reversed row stores
-                    # the cross-hands the other way round.
-                    labels = [str(p) for p in ds.polarization.values]
-                    cells[flipped] = cells[flipped][..., msdata.reversed_correlations(labels)]
-                already = flag | flag_row[:, None, None]
-                summary = {
-                    "cells": int(cells.sum()),
-                    "newly_flagged": int((cells & ~already).sum()),
-                    "backup": self.backup,
-                }
-                if dry_run:
-                    return {"id": None, **summary}
-
-                changed = cells & ~flag
-                new = flag | changed
-                # Only ever set: a row flagged through FLAG_ROW alone stays flagged.
-                new_row = flag_row | new.all(axis=(1, 2))
-                edit = Edit(
-                    id=self._next_id,
-                    rows=rows,
-                    corr_idx=list(corr_idx),
-                    changed=tuple(i.astype(np.int32) for i in np.nonzero(changed)),
-                    row_set=np.flatnonzero(new_row & ~flag_row),
-                    cells=summary["cells"],
-                    newly_flagged=summary["newly_flagged"],
-                    description=f"{name1}-{name2} field {field_id} spw {spw} scan {scan}",
-                )
+            # Nothing cached holds FLAG, so the write needs no re-open (see msdata.writing).
+            with nullcontext() if dry_run else msdata.writing(self.ms):
+                table = arcae.table(self.ms, readonly=dry_run)
                 try:
-                    table.putcol("FLAG", new, index=(rows,))
-                    table.putcol("FLAG_ROW", new_row, index=(rows,))
-                except Exception:
-                    # Put back what this edit wrote, so a half-written edit is not left behind unrecorded.
+                    flag = np.asarray(table.getcol("FLAG", index=(rows,)), dtype=bool)
+                    flag_row = np.asarray(table.getcol("FLAG_ROW", index=(rows,)), dtype=bool)
+                    # (row, channel) cells to set, broadcast over the chosen correlations.
+                    cells = np.zeros(flag.shape, dtype=bool)
+                    cells[..., corr_idx] = mask[slot][..., None]
+                    if flipped.any():
+                        # corr_idx is in the waterfall's order; a reversed row stores
+                        # the cross-hands the other way round.
+                        labels = [str(p) for p in ds.polarization.values]
+                        cells[flipped] = cells[flipped][..., msdata.reversed_correlations(labels)]
+                    already = flag | flag_row[:, None, None]
+                    summary = {
+                        "cells": int(cells.sum()),
+                        "newly_flagged": int((cells & ~already).sum()),
+                        "backup": self.backup,
+                    }
+                    if dry_run:
+                        return {"id": None, **summary}
+
+                    changed = cells & ~flag
+                    new = flag | changed
+                    # Only ever set: a row flagged through FLAG_ROW alone stays flagged.
+                    new_row = flag_row | new.all(axis=(1, 2))
+                    edit = Edit(
+                        id=self._next_id,
+                        rows=rows,
+                        corr_idx=list(corr_idx),
+                        changed=tuple(i.astype(np.int32) for i in np.nonzero(changed)),
+                        row_set=np.flatnonzero(new_row & ~flag_row),
+                        cells=summary["cells"],
+                        newly_flagged=summary["newly_flagged"],
+                        description=f"{name1}-{name2} field {field_id} spw {spw} scan {scan}",
+                    )
                     try:
-                        table.putcol("FLAG", flag, index=(rows,))
-                        table.putcol("FLAG_ROW", flag_row, index=(rows,))
-                    except Exception:  # noqa: BLE001 - keep the edit so undo can still try
-                        self._record(edit)
-                    raise
-            finally:
-                table.close()
-                if not dry_run:
-                    msdata.invalidate(self.ms)
+                        table.putcol("FLAG", new, index=(rows,))
+                        table.putcol("FLAG_ROW", new_row, index=(rows,))
+                    except Exception:
+                        # Put back what this edit wrote, so a half-written edit is not left behind unrecorded.
+                        try:
+                            table.putcol("FLAG", flag, index=(rows,))
+                            table.putcol("FLAG_ROW", flag_row, index=(rows,))
+                        except Exception:  # noqa: BLE001 - keep the edit so undo can still try
+                            self._record(edit)
+                        raise
+                finally:
+                    table.close()
 
             self._record(edit)
             return {"id": edit.id, **summary}
@@ -358,17 +359,17 @@ class Flagger:
             if not self.edits:
                 return None
             edit = self.edits[-1]
-            table = arcae.table(self.ms, readonly=False)
-            try:
-                flag = np.array(table.getcol("FLAG", index=(edit.rows,)), dtype=bool)
-                flag[edit.changed] = False
-                table.putcol("FLAG", flag, index=(edit.rows,))
-                if edit.row_set.size:
-                    flag_row = np.array(table.getcol("FLAG_ROW", index=(edit.rows,)), dtype=bool)
-                    flag_row[edit.row_set] = flag[edit.row_set].all(axis=(1, 2))
-                    table.putcol("FLAG_ROW", flag_row, index=(edit.rows,))
-            finally:
-                table.close()
-                msdata.invalidate(self.ms)
+            with msdata.writing(self.ms):
+                table = arcae.table(self.ms, readonly=False)
+                try:
+                    flag = np.array(table.getcol("FLAG", index=(edit.rows,)), dtype=bool)
+                    flag[edit.changed] = False
+                    table.putcol("FLAG", flag, index=(edit.rows,))
+                    if edit.row_set.size:
+                        flag_row = np.array(table.getcol("FLAG_ROW", index=(edit.rows,)), dtype=bool)
+                        flag_row[edit.row_set] = flag[edit.row_set].all(axis=(1, 2))
+                        table.putcol("FLAG_ROW", flag_row, index=(edit.rows,))
+                finally:
+                    table.close()
             self.edits.pop()
             return edit

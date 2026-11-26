@@ -312,7 +312,8 @@ the panel says so.
 
 Waterfalls are read through
 [xarray-ms](https://github.com/ratt-ru/xarray-ms), which presents an MSv2 table
-as an **MSv4** view. MSv4 renames the columns you are used to:
+as an **MSv4** view, which renames the columns you are used to. surfvis
+translates back, so menus and titles use the MSv2 names:
 
 | You know it as | MSv4 calls it |
 |---|---|
@@ -322,7 +323,7 @@ as an **MSv4** view. MSv4 renames the columns you are used to:
 | `WEIGHT_SPECTRUM` | `WEIGHT` |
 | `FLAG` | `FLAG` |
 
-**Either name works** in the column selector and on the URL. Columns that are
+Either name works on the URL. Columns that are
 not part of the MSv2 standard -- `RESIDUAL`, anything your calibration
 pipeline wrote -- are not renamed and appear under their own names. That is
 precisely why the residual column the chi-squared came from is plottable.
@@ -342,7 +343,7 @@ the container.
 **`No chi-squared dataset at ...`** -- `--data` wants the zarr from
 `chi2 --dataout`, not the `--imagesout` directory of PNGs.
 
-**`Column 'X' (MSv4 'Y') not in this Measurement Set`** -- the error lists what
+**`Column 'X' not in this Measurement Set`** -- the error lists what
 *is* available in that partition. If you expected a column your pipeline wrote,
 check it exists in the MS and is not empty.
 

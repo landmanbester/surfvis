@@ -221,6 +221,44 @@ def test_cached_plane_sees_a_flag_write(chi2_zarr, writable_ms):
 
 
 @needs_web
+def test_a_flag_write_reuses_the_open_scan_and_the_cached_plane(chi2_zarr, writable_ms, monkeypatch):
+    """Flagging, undoing and switching flag version re-read FLAG only.
+
+    Each used to clear every cache, and the next waterfall rebuilt the
+    partition: 25 s per scan on a MeerKAT MS, after every edit.
+    """
+    from surfvis.web import msdata
+    from surfvis.web.flagging import Flagger, save_flag_version
+
+    names = chi2_zarr["ms"]["antenna_names"]
+    formed = []
+    real = msdata._formed
+    monkeypatch.setattr(msdata, "_formed", lambda *a, **k: formed.append(1) or real(*a, **k))
+
+    def plane(**kw):
+        return msdata.cached_plane(writable_ms, 0, 0, 1, names[0], names[2], "XX", "RESIDUAL", **kw)
+
+    before = plane()
+    opened = msdata._open_partition.cache_info().misses
+    flagger = Flagger(writable_ms)
+    flagger.apply(0, 0, 1, names[0], names[2], np.array(_rect(2, 3, 5, 8)), corr_idx=[0])
+    flagged = plane()
+    assert flagged.flags[2:4, 5:9].all() and flagged.plane is before.plane
+    # Colours hold still across an edit, so the edit is what changes on screen.
+    assert flagged.limits is before.limits
+    flagger.undo()
+    np.testing.assert_array_equal(plane().flags, before.flags)
+
+    save_flag_version(writable_ms, "edited", "a probe")
+    version = plane(flagversion="edited")
+    np.testing.assert_array_equal(version.flags, before.flags)
+    assert version.plane is before.plane and version.limits is not before.limits
+
+    assert msdata._open_partition.cache_info().misses == opened
+    assert len(formed) == 1
+
+
+@needs_web
 def test_flag_row_is_only_ever_set(chi2_zarr, writable_ms):
     """A row flagged through FLAG_ROW alone stays flagged when part of it is flagged again."""
     from casacore.tables import table

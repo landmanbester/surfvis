@@ -251,13 +251,8 @@ def create_app(
         return Response(png, media_type="image/png")
 
     def _resolve(column: str) -> str:
-        """MSv4 name for a column, so ``DATA`` from chi2 matches ``VISIBILITY`` in the menus."""
-        if not column:
-            return column
-        try:
-            return msdata.data_group(ms_path).resolve(column)
-        except Exception:
-            return column
+        """MSv2 name for a column, as the menus list them, whichever name it was given by."""
+        return msdata.msv2_name(column)
 
     def _waterfall_settings(matrix, product, column, model, gtable, flagversion, quantity):
         """Fill unset waterfall controls from how chi2 formed the heatmap.

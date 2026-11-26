@@ -7,7 +7,8 @@ waterfall shape, so no row-to-grid pivot is needed.
 MSv4 renames the columns you are used to -- ``DATA`` is exposed as
 ``VISIBILITY``, ``CORRECTED_DATA`` as ``VISIBILITY_CORRECTED``, ``MODEL_DATA``
 as ``VISIBILITY_MODEL`` and ``WEIGHT_SPECTRUM`` as ``WEIGHT``; see
-:class:`DataGroup`. Columns that are *not* part of the MSv2 standard --
+:class:`DataGroup`. This module's public functions speak MSv2 names (menus,
+titles) and translate at the xarray boundary. Columns that are *not* part of the MSv2 standard --
 ``RESIDUAL``, say -- are surfaced verbatim as secondary variables, which is
 what makes the residual column surfchi2 works on plottable.
 
@@ -16,6 +17,12 @@ ANTENNA2`` is converted on read to the baseline ``(ANTENNA2, ANTENNA1)``,
 conjugated with its cross-hands swapped. Everything here therefore follows
 xarray-ms's ``baseline_antenna1/2_name``, and only code that touches MS rows
 directly (flag versions, flag writes) needs to know a row was reversed.
+
+FLAG is never read through xarray-ms: it is read by row with arcae on every
+request, and cached planes hold only the values and what the data itself
+flags (gaps, gains). So a flag write made by this process (:func:`writing`)
+costs one FLAG read to show, not a re-read of the data columns or a rebuild
+of the partition.
 """
 
 import os
@@ -49,8 +56,16 @@ PARTITION_SCHEMA = ("FIELD_ID", "DATA_DESC_ID", "SCAN_NUMBER")
 # versions are keyed on the raw MJD values.
 MJD_UNIX_OFFSET = 3506716800.0
 
-# Last-seen on-disk signature per MS, so a rewrite invalidates the caches.
+# Last-seen on-disk signature per MS, so a rewrite invalidates the caches,
+# and a counter bumped each time it does, which keys the partition and plane
+# caches. A FLAG write made through :func:`writing` updates the signature
+# without bumping the counter.
 _FINGERPRINTS: dict[str, tuple] = {}
+_GENERATIONS: dict[str, int] = {}
+# Held across a write by this process and across the signature check in
+# ``_open``, so a request never mistakes a half-done write of ours for
+# someone else's.
+_WRITE_LOCK = threading.Lock()
 
 
 class _Coalescer:
@@ -96,6 +111,12 @@ _MSV4_NAMES = {
     "WEIGHT_SPECTRUM": "WEIGHT",
     "FLAG": "FLAG",
 }
+_MSV2_NAMES = {v: k for k, v in _MSV4_NAMES.items()}
+
+
+def msv2_name(name: str) -> str:
+    """The MSv2 column behind an MSv4 variable name; other names pass through."""
+    return _MSV2_NAMES.get(name, name)
 
 
 @dataclass(frozen=True)
@@ -146,6 +167,8 @@ class Waterfall:
     freqs: np.ndarray | None = None
     # Colour limits per quantity, filled in by the canvas route on a cached plane.
     limits: dict = field(default_factory=dict, compare=False, repr=False)
+    # MS correlations (indices into POLARIZATION) whose FLAG flags this product.
+    flag_corrs: tuple[int, ...] = field(default=(), compare=False, repr=False)
 
 
 # xarray-ms's standard data groups. They are constants (``corrected`` and
@@ -176,10 +199,10 @@ def data_group(ms: str, group: str = "base") -> DataGroup:
 
 @lru_cache(maxsize=8)
 @timed("open_partition")
-def _open_partition(ms: str, field: int, spw: int, scan: int, fingerprint: tuple) -> xarray.Dataset:
+def _open_partition(ms: str, field: int, spw: int, scan: int, generation: int) -> xarray.Dataset:
     """Open one (field, spw, scan) partition. Cached -- opening is not free.
 
-    ``fingerprint`` takes no part in the work; it is in the signature so that a
+    ``generation`` takes no part in the work; it is in the signature so that a
     Measurement Set rewritten on disk gets a different cache key.
     """
     return xarray.open_dataset(
@@ -279,19 +302,42 @@ def _open(ms: str, field: int, spw: int, scan: int) -> xarray.Dataset:
     waterfalls keep showing the flags the process read first, which looks like
     a plotting bug and is impossible to tell apart from one.
     """
-    fingerprint = _fingerprint(ms)
-    if _FINGERPRINTS.get(ms) != fingerprint:
-        # Also taken on the first request for an MS, when nothing is cached yet.
-        _open_partition.cache_clear()
-        _release_cached_tables()
-        _FINGERPRINTS[ms] = fingerprint
+    with _WRITE_LOCK:
+        fingerprint = _fingerprint(ms)
+        if _FINGERPRINTS.get(ms) != fingerprint:
+            # Also taken on the first request for an MS, when nothing is cached yet.
+            _open_partition.cache_clear()
+            _release_cached_tables()
+            _FINGERPRINTS[ms] = fingerprint
+            _GENERATIONS[ms] = _GENERATIONS.get(ms, 0) + 1
+        generation = _GENERATIONS[ms]
     with _OPENING.hold((ms, field, spw, scan), "open_partition"):
-        return _open_partition(ms, field, spw, scan, fingerprint)
+        return _open_partition(ms, field, spw, scan, generation)
+
+
+@contextmanager
+def writing(ms: str):
+    """Hold around a write to FLAG made by this process, so it does not cost a re-open.
+
+    Nothing cached holds FLAG, so the partitions and planes stay valid across
+    the write; on exit the MS's new on-disk signature is recorded as seen,
+    which keeps ``_open`` from taking the write for a rewrite by another
+    program (25 s per scan to rebuild on a MeerKAT MS). If the MS had already
+    changed underneath before the write began, that change is left for
+    ``_open`` to notice.
+    """
+    with _WRITE_LOCK:
+        current = _FINGERPRINTS.get(ms) == _fingerprint(ms)
+        try:
+            yield
+        finally:
+            if current:
+                _FINGERPRINTS[ms] = _fingerprint(ms)
 
 
 @timed("available_columns")
 def available_columns(ms: str, field: int, spw: int, scan: int, complex_only: bool = False) -> list[str]:
-    """Data variables with a (time, baseline, freq, pol) shape, i.e. plottable.
+    """Data variables with a (time, baseline, freq, pol) shape, i.e. plottable, by their MSv2 names.
 
     ``complex_only`` restricts to visibility-like columns -- what makes sense
     as a model to subtract, which ``WEIGHT`` does not.
@@ -301,7 +347,7 @@ def available_columns(ms: str, field: int, spw: int, scan: int, complex_only: bo
     wanted = ("time", "baseline_id", "frequency", "polarization")
     # The flag variable has the right shape but is the overlay, not a quantity.
     return sorted(
-        name
+        msv2_name(name)
         for name, var in ds.data_vars.items()
         if var.dims == wanted and name != flag and (not complex_only or np.iscomplexobj(var))
     )
@@ -534,11 +580,13 @@ def slot_index(grid: np.ndarray, times: np.ndarray) -> tuple[np.ndarray, np.ndar
 def invalidate(ms: str) -> None:
     """Forget everything cached about ``ms``, so the next read goes to disk.
 
-    For writes made by this process: ``_open`` notices a rewritten MS by its
-    storage files' mtimes, but a write and a read inside one mtime tick would
-    slip past that.
+    Not needed after a FLAG write (see :func:`writing`); this is for a
+    rewrite of the data columns that ``_open``'s on-disk signature could miss
+    (a write and a read inside one mtime tick). The next open rebuilds the
+    partition, which on a large MS is half a minute.
     """
-    _FINGERPRINTS.pop(ms, None)
+    with _WRITE_LOCK:
+        _FINGERPRINTS.pop(ms, None)
     _open_partition.cache_clear()
     _cached_plane.cache_clear()
     _release_cached_tables()
@@ -591,10 +639,9 @@ def _warm(key: tuple) -> bool:
         return False
 
 
-@timed("version_flags")
-def _version_flags(
+@timed("read flags")
+def _baseline_flags(
     ms: str,
-    version: str,
     field: int,
     spw: int,
     scan: int,
@@ -603,40 +650,42 @@ def _version_flags(
     grid: np.ndarray,
     corr_idx: list[int],
     labels: list[str],
+    version: str = "",
 ) -> np.ndarray:
-    """One baseline's flags from a saved flag version, on the partition's time grid.
+    """One baseline's flags, live or from a saved flag version, on the partition's time grid.
 
-    The version tables are row-aligned with the main table, so the baseline's
-    rows are found in the main table and the same row numbers read from the
-    version. Rows stored reversed have their cross-hands swapped, as
-    xarray-ms does for the live FLAG. Rows the grid has but the MS does not
-    are flagged, as they are for the live FLAG column. Read with arcae, the
-    same library xarray-ms uses, so the web layer needs no python-casacore.
+    Read by row with arcae on every call rather than through xarray-ms, so a
+    cached partition never serves flags from before a write. The version
+    tables are row-aligned with the main table, so the same row numbers serve
+    both. FLAG_ROW flags the whole row. Rows stored reversed have their
+    cross-hands swapped, as xarray-ms does for the data. Slots the grid has
+    but the MS does not are flagged.
+
+    Raises:
+        KeyError: for an unknown flag version or a baseline with no rows.
     """
     import arcae
 
-    if version not in flag_versions(ms):
+    if version and version not in flag_versions(ms):
         raise KeyError(f"No flag version {version!r} for {ms}. Have: {flag_versions(ms)}")
 
     rows, times, flipped = baseline_rows(ms, field, spw, scan, name1, name2)
-
-    nchan = None
-    if rows.size:
-        vt = arcae.table(f"{ms.rstrip('/')}.flagversions/flags.{version}")
-        try:
-            # arcae returns boolean columns as uint8.
-            flags = np.array(vt.getcol("FLAG", index=(rows,)), dtype=bool)
-            if flipped.any():
-                flags[flipped] = flags[flipped][..., reversed_correlations(labels)]
-            flags = flags[..., corr_idx]
-            flags |= np.asarray(vt.getcol("FLAG_ROW", index=(rows,)), dtype=bool)[:, None, None]
-            nchan = flags.shape[1]
-        finally:
-            vt.close()
-
-    if nchan is None:
+    if not rows.size:
         raise KeyError(f"No rows for {name1}-{name2} in scan {scan}")
-    out = np.ones((grid.size, nchan, len(corr_idx)), dtype=bool)
+
+    path = f"{ms.rstrip('/')}.flagversions/flags.{version}" if version else ms
+    table = arcae.table(path)
+    try:
+        # arcae returns boolean columns as uint8.
+        flags = np.array(table.getcol("FLAG", index=(rows,)), dtype=bool)
+        flag_row = np.asarray(table.getcol("FLAG_ROW", index=(rows,)), dtype=bool)
+    finally:
+        table.close()
+    if flipped.any():
+        flags[flipped] = flags[flipped][..., reversed_correlations(labels)]
+    flags = flags[..., corr_idx] | flag_row[:, None, None]
+
+    out = np.ones((grid.size, flags.shape[1], len(corr_idx)), dtype=bool)
     idx, hit = slot_index(grid, times)
     out[idx[hit]] = flags[hit]
     return out
@@ -726,8 +775,8 @@ def waterfall(
         name1: Name of the first antenna.
         name2: Name of the second antenna.
         product: A correlation (``XX``) or Stokes parameter (``V``).
-        column: Column to plot. MSv2 names are translated through the data
-            group, so ``DATA`` finds ``VISIBILITY``; non-standard names such as
+        column: Column to plot, by its MSv2 name (``DATA``); MSv4 names
+            (``VISIBILITY``) are accepted too, and non-standard names such as
             ``RESIDUAL`` are used as given.
         quantity: One of ``amp``, ``phase``, ``real``, ``imag``.
         rect: Chunk bounds ``(t0, tf, chan0, chanf)`` to outline, in slots
@@ -745,13 +794,52 @@ def waterfall(
     """
     if quantity not in QUANTITIES:
         raise ValueError(f"quantity must be one of {QUANTITIES}, got {quantity!r}")
+    wf = _with_flags(
+        ms, field, spw, scan, _formed(ms, field, spw, scan, name1, name2, product, column, model, gtable), flagversion
+    )
+    return replace(wf, values=_quantity(wf.plane, quantity), quantity=quantity, rect=rect)
 
+
+def _quantity(plane: np.ndarray, quantity: str) -> np.ndarray:
+    if quantity == "phase":
+        values = np.angle(plane)
+    elif quantity == "real":
+        values = np.real(plane)
+    elif quantity == "imag":
+        values = np.imag(plane)
+    else:
+        values = np.abs(plane)
+    return np.asarray(values, dtype=float)
+
+
+def _formed(
+    ms: str,
+    field: int,
+    spw: int,
+    scan: int,
+    name1: str,
+    name2: str,
+    product: str,
+    column: str,
+    model: str = "",
+    gtable: str = "",
+) -> Waterfall:
+    """The formed complex plane, with only the flags the data itself implies.
+
+    ``flags`` holds the grid's gaps and what the gains flag, not FLAG, so the
+    result stays valid across flag writes. :func:`_with_flags` adds FLAG: a
+    product is flagged wherever :func:`products.form` would flag it, which is
+    where any correlation it reads is flagged, so OR-ing those in afterwards
+    is exact. ``values`` is None.
+    """
     ds = _open(ms, field, spw, scan)
     group = data_group(ms)
     resolved = group.resolve(column)
     for name in (resolved, group.resolve(model) if model else None):
         if name is not None and name not in ds.data_vars:
-            raise KeyError(f"Column {name!r} not in this Measurement Set. Have: {sorted(ds.data_vars)}")
+            raise KeyError(
+                f"Column {msv2_name(name)!r} not in this Measurement Set. Have: {sorted(map(msv2_name, ds.data_vars))}"
+            )
 
     # The grid is symmetric, so a click can ask for (q, p); the data is in
     # xarray-ms's order, and gains, cross-hand labels and the title follow it.
@@ -776,16 +864,11 @@ def waterfall(
     if model:
         with span(f"read {group.resolve(model)}"):
             mvis = ds[group.resolve(model)].isel(sel).values
-    if flagversion:
-        flags = _version_flags(ms, flagversion, field, spw, scan, name1, name2, ms_times(ds), corr_idx, labels_)
-    else:
-        with span("read flags"):
-            flags = ds[group.flag].isel(sel).values.astype(bool)
     # xarray-ms lays a regular (time, baseline) grid over the MS and fills gaps
     # with NaN. Those slots hold no data, so treat them as flagged rather than
     # letting them punch holes in the colour scale.
-    flags |= ~np.isfinite(vis)
-    vis = np.where(np.isfinite(vis), vis, 0)
+    gaps = ~np.isfinite(vis)
+    vis = np.where(gaps, 0, vis)
     if mvis is not None:
         mvis = np.where(np.isfinite(mvis), mvis, 0)
 
@@ -799,40 +882,40 @@ def waterfall(
             read,
             vis,
             None,  # unit weights; the waterfall plots values only
-            flags,
+            gaps,
             ant1,
             ant2,
             tidx=tidx,
             gains=gains,
             model=mvis,
         )
-    plane, pflags = plane[..., 0], pflags[..., 0]
-
-    if quantity == "phase":
-        values = np.angle(plane)
-    elif quantity == "real":
-        values = np.real(plane)
-    elif quantity == "imag":
-        values = np.imag(plane)
-    else:
-        values = np.abs(plane)
-    values = np.asarray(values, dtype=float)
 
     return Waterfall(
-        values=values,
-        flags=pflags,
+        values=None,
+        flags=pflags[..., 0],
         antenna1=name1,
         antenna2=name2,
         scan=scan,
-        column=_describe(resolved, group.resolve(model) if model else "", gtable),
-        quantity=quantity,
+        column=_describe(msv2_name(resolved), msv2_name(group.resolve(model)) if model else "", gtable),
+        quantity="amp",
         product=product,
-        rect=rect,
+        rect=None,
         length=baseline_length(ms, name1, name2),
         times=ms_times(ds) - MJD_UNIX_OFFSET,
-        plane=plane,
+        plane=plane[..., 0],
         freqs=np.asarray(ds.frequency.values, dtype=float),
+        flag_corrs=tuple(corr_idx),
     )
+
+
+def _with_flags(ms: str, field: int, spw: int, scan: int, wf: Waterfall, flagversion: str = "") -> Waterfall:
+    """``wf`` with FLAG (or a flag version) as it is on disk now added to its flags."""
+    ds = _open(ms, field, spw, scan)
+    labels_ = [str(p) for p in ds.polarization.values]
+    flags = _baseline_flags(
+        ms, field, spw, scan, wf.antenna1, wf.antenna2, ms_times(ds), list(wf.flag_corrs), labels_, flagversion
+    )
+    return replace(wf, flags=wf.flags | flags.any(axis=-1))
 
 
 def cached_plane(
@@ -850,19 +933,23 @@ def cached_plane(
 ) -> Waterfall:
     """One baseline's formed complex plane, cached so zooming does not re-read the MS.
 
-    The key includes the MS's on-disk fingerprint and the gain term's mtime,
-    so a rewritten MS or a re-solved gain table is read afresh. ``quantity``
-    and the chunk rectangle are not part of the key. The entry is slimmed to
-    save memory: ``plane`` is complex64 and ``values`` is None, so use
-    ``plane``; ``rect`` is None.
+    The cache holds the plane without FLAG, keyed on the MS's generation (see
+    ``_open``) and the gain term's mtime, so a rewritten MS or a re-solved gain
+    table is read afresh. The flags (live or ``flagversion``) are read on
+    every call, which costs one FLAG read: a flag edit or a switch of flag
+    version does not re-read the data columns. ``quantity`` and the chunk
+    rectangle are not part of the key. ``plane`` is complex64 and ``values``
+    is None, so use ``plane``; ``rect`` is None. ``limits`` is shared by every
+    call with the same flag version, so colours hold still across zooms and
+    flag edits.
 
     Keyed on the baseline as xarray-ms presents it, so the two cells of the
     symmetric heatmap share one entry instead of each reading the MS.
     """
     name1, name2 = view_order(_open(ms, field, spw, scan), name1, name2)
-    key = (ms, field, spw, scan, name1, name2, product, column, model, gtable, flagversion)
+    key = (ms, field, spw, scan, name1, name2, product, column, model, gtable)
     with _PLANES.hold(key, "cached_plane"):
-        return _cached_plane(
+        entry = _cached_plane(
             ms,
             field,
             spw,
@@ -873,10 +960,11 @@ def cached_plane(
             column,
             model,
             gtable,
-            flagversion,
-            _fingerprint(ms),
+            _GENERATIONS.get(ms, 0),
             _gtable_stamp(gtable),
         )
+    wf = _with_flags(ms, field, spw, scan, entry, flagversion)
+    return replace(wf, limits=entry.limits.setdefault(flagversion, {}))
 
 
 _PLANES = _Coalescer()
@@ -884,26 +972,10 @@ _PLANES = _Coalescer()
 
 @lru_cache(maxsize=4)
 @timed("cached_plane: miss")
-def _cached_plane(
-    ms, field, spw, scan, name1, name2, product, column, model, gtable, flagversion, fingerprint, gstamp
-) -> Waterfall:
-    # fingerprint and gstamp only key the cache.
-    wf = waterfall(
-        ms,
-        field,
-        spw,
-        scan,
-        name1,
-        name2,
-        product,
-        column,
-        quantity="amp",
-        rect=None,
-        model=model,
-        gtable=gtable,
-        flagversion=flagversion,
-    )
-    return replace(wf, plane=wf.plane.astype(np.complex64), values=None)
+def _cached_plane(ms, field, spw, scan, name1, name2, product, column, model, gtable, generation, gstamp) -> Waterfall:
+    # generation and gstamp only key the cache.
+    wf = _formed(ms, field, spw, scan, name1, name2, product, column, model, gtable)
+    return replace(wf, plane=wf.plane.astype(np.complex64))
 
 
 def _gtable_stamp(gtable: str) -> int | None:
