@@ -4,6 +4,7 @@ import concurrent.futures as cf
 import multiprocessing as mp
 import os
 import shutil
+import time as time_mod
 from pathlib import Path
 
 import arcae
@@ -81,6 +82,8 @@ def chi2(
 
     # chunking info
     schema = {fcol: {"dims": ("chan", "corr")}}
+    # Before FLAG is read: an edit made while chi2 runs must count as newer.
+    started = time_mod.time()
     xds = xds_from_ms(
         msname,
         chunks={"row": -1},
@@ -282,6 +285,8 @@ def chi2(
             "mcol": mcol or "",
             "gtable": gtable or "",
             "corr_labels": list(labels),
+            # serve compares this with its audit log to mark a scan stale.
+            "created": started,
         },
     )
 

@@ -539,6 +539,44 @@ def baseline_rows(
     return scan_.rows[hit].copy(), scan_.times[hit], backward[hit]
 
 
+@timed("scope_rows")
+def scope_rows(
+    ms: str, field: int, spw: int, scan: int, ds: xarray.Dataset, antennas: tuple[str, ...] | None
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, int]:
+    """Main-table rows of a scan's baselines that involve any of ``antennas`` (every row for None).
+
+    An antenna's rows include its auto-correlation. Like :func:`baseline_rows`,
+    each row is marked ``reversed`` when it is stored the other way round
+    from how xarray-ms presents its baseline in ``ds``.
+
+    Returns:
+        Row numbers (writable), their TIME values in MJD seconds, whether
+        each is stored reversed, and how many distinct baselines they span.
+
+    Raises:
+        KeyError: if an antenna is not in the MS.
+    """
+    ids = _antenna_ids(ms, _layout_stamp(ms))
+    scan_ = scan_rows(ms, field, spw, scan)
+    a1, a2 = scan_.antenna1, scan_.antenna2
+    if antennas is None:
+        hit = np.ones(a1.shape, bool)
+    else:
+        want = np.array([ids[name] for name in antennas])
+        hit = np.isin(a1, want) | np.isin(a2, want)
+    a1, a2 = a1[hit], a2[hit]
+    n = max(ids.values(), default=0) + 1
+    presented = np.array(
+        [
+            ids[str(x)] * n + ids[str(y)]
+            for x, y in zip(ds.baseline_antenna1_name.values, ds.baseline_antenna2_name.values)
+        ]
+    )
+    reversed_ = (a1 != a2) & ~np.isin(a1 * n + a2, presented)
+    nbaselines = np.unique(np.minimum(a1, a2) * n + np.maximum(a1, a2)).size
+    return scan_.rows[hit].copy(), scan_.times[hit], reversed_, int(nbaselines)
+
+
 def view_order(ds: xarray.Dataset, name1: str, name2: str) -> tuple[str, str]:
     """A baseline's antennas in the order xarray-ms presents it, which is the order its data is in.
 

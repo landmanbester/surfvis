@@ -24,6 +24,7 @@ EXPECTED = {
     "test_autos.py": (4, 4),
     "test_commands.py": (10, 10),
     "test_flagging.py": (22, 22),
+    "test_scopes.py": (8, 8),
     "test_install.py": (2, 0),
     "test_planes.py": (9, 0),
     "test_products.py": (9, 0),

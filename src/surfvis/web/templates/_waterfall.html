@@ -90,6 +90,12 @@
     <div class="wf-bar wf-flagbar">
       <label class="wf-check" title="Flag every correlation of the baseline, not only those the plotted product is formed from">
         <input type="checkbox" class="wf-allcorr" checked> all correlations</label>
+      <label class="wf-check" title="Which baselines of this scan a selection is applied to">baselines
+        <select class="wf-scope">
+          <option value="baseline" selected>this one</option>
+          {% for index, name in scope_antennas %}<option value="antenna:{{ index }}">every baseline of {{ name }}</option>
+          {% endfor %}<option value="all">all baselines</option>
+        </select></label>
       <button type="button" class="wf-apply wf-button" hidden></button>
       <button type="button" class="wf-undo wf-button" hidden></button>
       <span class="wf-flagstatus" aria-live="polite"></span>

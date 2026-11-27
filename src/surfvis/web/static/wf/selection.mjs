@@ -142,20 +142,35 @@ export class Selection {
 export function confirmLabel(dry) {
   const n = (v) => v.toLocaleString("en-US");
   const on = dry.correlations?.length ? ` on ${dry.correlations.join(", ")}` : "";
-  if (!dry.newly_flagged) return `Nothing new to flag (${n(dry.cells)} selected, all flagged already)`;
-  return `Flag ${n(dry.newly_flagged)} new cells (${n(dry.cells)} selected)${on}`;
+  const over = dry.baselines > 1 ? ` · ${n(dry.baselines)} baselines` : "";
+  if (!dry.newly_flagged) return `Nothing new to flag (${n(dry.cells)} selected, all flagged already)${over}`;
+  return `Flag ${n(dry.newly_flagged)} new cells (${n(dry.cells)} selected)${on}${over}`;
+}
+
+// What an edit covered, in words: a baseline, an antenna's baselines or all.
+function where(edit) {
+  if (edit.scope === "all") return "all baselines";
+  if (edit.scope === "antenna") return `every baseline of ${edit.scope_antennas[0]}`;
+  const [a, b] = edit.antennas;
+  return a === b ? `${a} auto` : `${a}–${b}`;
 }
 
 // The undo button's label for an edit summary from the server.
 export function undoLabel(edit) {
-  const [a, b] = edit.antennas;
-  const baseline = a === b ? `${a} auto` : `${a}–${b}`;
-  return `Undo ${baseline}, scan ${edit.scan}, ${edit.newly_flagged.toLocaleString("en-US")} cells`;
+  return `Undo ${where(edit)}, scan ${edit.scan}, ${edit.newly_flagged.toLocaleString("en-US")} cells`;
 }
 
-// Whether an edit is on the baseline a panel shows, whichever order the panel names it in.
+// Whether an edit covered the baseline a panel shows, whichever order the panel names it in.
 export function sameBaseline(edit, ctx, name1, name2) {
   if (edit.field !== ctx.field || edit.spw !== ctx.spw || edit.scan !== ctx.scan) return false;
+  if (edit.scope === "all") return true;
+  if (edit.scope === "antenna") return [name1, name2].includes(edit.scope_antennas[0]);
   const [a, b] = edit.antennas;
   return (a === name1 && b === name2) || (a === name2 && b === name1);
+}
+
+// The /flag fields for the scope menu's value: "baseline", "antenna:<index>" or "all".
+export function scopeParams(value) {
+  if (value?.startsWith("antenna:")) return { baselines: "antenna", antenna: Number(value.slice(8)) };
+  return { baselines: value === "all" ? "all" : "baseline" };
 }

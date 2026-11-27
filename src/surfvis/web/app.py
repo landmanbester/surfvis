@@ -42,6 +42,11 @@ class FlagRequest(BaseModel):
     # "all" (the default: one flagged correlation should flag them all) or
     # "product": the correlations the plotted product is formed from.
     correlations: Literal["product", "all"] = "all"
+    # Which baselines: the panel's, every baseline of one of its antennas
+    # (``antenna``, an index like p and q, must be one of them), or every
+    # baseline in the scan.
+    baselines: Literal["baseline", "antenna", "all"] = "baseline"
+    antenna: int | None = Field(default=None, ge=0)
     # The panel's settings the selection was drawn on. A gain table can change
     # which correlations a product reads; a flag version means the picture is
     # not FLAG, so a selection drawn on it is refused.
@@ -223,6 +228,8 @@ def create_app(
             "names": matrix.antenna_names,
             "values": [[None if np.isnan(v) else round(float(v), 4) for v in row] for row in matrix.chi2_dof],
             "positions": msdata.antenna_positions(ms_path, matrix.antenna_names),
+            "stale": _stale(field, spw, scan),
+            "where": {"field": field, "spw": spw, "scan": scan},
         }
         return templates.TemplateResponse(
             request,
@@ -242,6 +249,7 @@ def create_app(
                 "scales": render.SCALES,
                 "product": c,
                 "grid": grid,
+                "stale": grid["stale"],
                 # The diagonal plots auto-correlations; unknown (None) for an older zarr, so offered.
                 "autos": matrix.autos is not False,
             },
@@ -264,6 +272,24 @@ def create_app(
         with profiling.span("render histogram"):
             png = render.histogram_png(matrix.chi2_dof, norm)
         return Response(png, media_type="image/png")
+
+    def _stale(field: int, spw: int, scan: int) -> dict:
+        """Edits to a scan still applied and newer than its χ² (see :func:`flagging.outstanding`).
+
+        ``all`` when one covered every baseline; otherwise the ``antennas``
+        whose every baseline was edited and the single ``baselines``.
+        """
+        group = store.group(field, spw, scan)
+        since = group.attrs.get("created")
+        if since is None:  # written before chi2 recorded it
+            since = os.path.getmtime(store.path)
+        edits = flagging.outstanding(ms_path, field, spw, scan, float(since))
+        return {
+            "edits": len(edits),
+            "all": any(e.get("scope") == "all" for e in edits),
+            "antennas": sorted({a for e in edits if e.get("scope") == "antenna" for a in e.get("antennas", [])}),
+            "baselines": [e.get("antennas", []) for e in edits if e.get("scope") == "baseline"],
+        }
 
     def _has_auto(field: int, spw: int, scan: int, name: str) -> bool:
         """Whether the MS holds ``name``'s auto-correlation in this scan."""
@@ -378,6 +404,8 @@ def create_app(
                 "problems": problems,
                 # What a selection drawn on this panel is posted with (see /flag).
                 "flagging": flagger is not None,
+                # The antennas a selection's scope can widen to, as (index, name).
+                "scope_antennas": list(dict.fromkeys((matrix.antenna_names.index(n), n) for n in (name1, name2))),
                 "flag_context": {
                     "field": field,
                     "spw": spw,
@@ -563,6 +591,11 @@ def create_app(
                 corr_idx = list(range(len(labels)))
             else:
                 corr_idx = msdata.product_correlations(ms_path, req.field, req.spw, req.scan, req.product, gtable)
+            antenna = None
+            if req.baselines == "antenna":
+                if req.antenna not in (req.p, req.q):
+                    raise ValueError("The antenna scope must name one of the panel's two antennas")
+                antenna = names[req.antenna]
             result = flagger_.apply(
                 req.field,
                 req.spw,
@@ -572,6 +605,9 @@ def create_app(
                 np.asarray(req.vertices, dtype=float),
                 corr_idx,
                 dry_run=req.dry_run,
+                scope=req.baselines,
+                antenna=antenna,
+                product=req.product,
             )
             return {**result, "correlations": [labels[i] for i in corr_idx]}
         except BackupPendingError as exc:
@@ -593,6 +629,14 @@ def create_app(
         if edit is None:
             raise HTTPException(status_code=409, detail="Nothing to undo")
         return {"undone": edit.id, **edit.summary()}
+
+    @app.get("/stale")
+    def stale(field: int = Query(...), spw: int = Query(...), scan: int = Query(...)):
+        """Which baselines of a scan have edits newer than its χ², from the audit log."""
+        try:
+            return _stale(field, spw, scan)
+        except (KeyError, IndexError, FileNotFoundError) as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
 
     @app.get("/flag/state")
     def flag_state():

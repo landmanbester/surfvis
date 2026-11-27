@@ -68,6 +68,10 @@ main { display: flex; flex-direction: column; gap: 1rem; padding: 1rem; }
 }
 .grid i { display: block; cursor: pointer; }
 .grid i.auto { cursor: default; }
+/* Stale: chi-squared predates a manual edit still applied. A corner mark, over any colour. */
+.grid i.stale { position: relative; }
+.grid i.stale::after { content: ""; position: absolute; top: 0; right: 0; width: 45%; height: 45%;
+  background: linear-gradient(225deg, var(--text) 0 50%, transparent 50%); pointer-events: none; }
 /* Auto-correlations have no chi-squared, only a waterfall: hatched, not coloured. */
 .grid i.auto.plotted { cursor: pointer;
   background: repeating-linear-gradient(135deg, var(--muted) 0 1px, var(--bg) 1px 4px); }

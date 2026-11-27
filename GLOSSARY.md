@@ -14,13 +14,21 @@ A closed selection shown with the cells it covers, awaiting confirmation.
 _Avoid_: preview (that is how it is shown, not what it is)
 
 **Edit**:
-A selection applied to FLAG on one baseline, recording exactly the cells it turned on; undo reverts one edit.
+A selection applied to FLAG over its scope, recording exactly the cells it turned on; undo reverts one edit, whatever its scope.
 _Avoid_: flagging operation, change
 
 **Scope**:
-Where a selection is applied: one baseline's correlations (all of them, by default, or only those its product is formed from); later, an antenna's baselines or all baselines.
+Where a selection is applied, always within its scan: which baselines (the one it was drawn on, every baseline of one antenna including its auto-correlation, or every baseline in the scan) and which correlations (all of them, by default, or only those its product is formed from).
 _Avoid_: target, extent
 
 **Backup**:
 The flag version a flagging session saves before its first edit.
 _Avoid_: snapshot, autosave
+
+**Audit log**:
+The durable record next to the MS of every edit applied and undone: when, by whom, where, its scope, its selection and the cells it changed.
+_Avoid_: history, journal (the journal is what makes one write crash-safe)
+
+**Stale**:
+A scan whose χ² predates edits that are still applied: the heatmap no longer describes the MS's FLAG.
+_Avoid_: outdated, dirty

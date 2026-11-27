@@ -27,13 +27,17 @@ Design and plan: https://github.com/ratt-ru/surfvis/issues/16
 
 import atexit
 import filecmp
+import functools
+import getpass
 import json
 import os
 import shutil
+import socket
 import sys
 import threading
 import time
 import weakref
+import zlib
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 
@@ -42,6 +46,20 @@ import numpy as np
 # Rows per read/write when copying FLAG for a backup: bounds memory on a large
 # MS (a MeerKAT row is up to 32k channels x 4 correlations).
 BACKUP_CHUNK_BYTES = 256 * 2**20
+
+# FLAG cells per read or write of a selection: a selection over every
+# baseline of a MeerKAT scan can cover billions, so they go in row chunks.
+CHUNK_CELLS = 2**24
+
+# Where a selection applies, besides its correlations (see GLOSSARY.md).
+SCOPES = ("baseline", "antenna", "all")
+
+# The audit log, in ``<ms>.flagversions/``: one JSON object per line for
+# every edit applied, undone or rolled back, by any session.
+AUDIT_LOG = "surfvis_flags.jsonl"
+
+# MJD seconds of the unix epoch.
+_MJD_UNIX = 3506716800.0
 
 # Selections are drawn on a waterfall a few thousand cells across; a vertex
 # beyond this is a crafted request, and would overflow the edge arithmetic.
@@ -212,7 +230,7 @@ def _storage_files(ms: str, table) -> tuple[list[str], list[str]]:
     return headers, files
 
 
-def _write_journal(ms: str, edit: "Edit", headers: list[str]) -> None:
+def _write_journal(ms: str, edit: "Edit", headers: list[str], op: str) -> None:
     """Record an edit and copy the storage-manager headers, durably, before a write touches the MS.
 
     Built under a temporary name and renamed into place, so a journal is
@@ -226,16 +244,28 @@ def _write_journal(ms: str, edit: "Edit", headers: list[str]) -> None:
     for name in headers:
         shutil.copyfile(os.path.join(ms, name), os.path.join(tmp, "headers", name))
         _fsync(os.path.join(tmp, "headers", name))
+    blobs = [np.frombuffer(blob, np.uint8) for _, _, blob in edit.changed]
     np.savez(
         os.path.join(tmp, "edit.npz"),
         rows=edit.rows,
-        changed_row=edit.changed[0],
-        changed_chan=edit.changed[1],
-        changed_corr=edit.changed[2],
         row_set=edit.row_set,
+        chan=np.asarray(edit.chan, np.int64),
+        ncorr=np.int64(edit.ncorr),
+        bounds=np.asarray([(i0, i1) for i0, i1, _ in edit.changed], np.int64).reshape(-1, 2),
+        offsets=np.cumsum([0] + [b.size for b in blobs]).astype(np.int64),
+        blob=np.concatenate(blobs) if blobs else np.zeros(0, np.uint8),
     )
     with open(os.path.join(tmp, "journal.json"), "w") as meta:
-        json.dump({"ms": os.path.abspath(ms), "headers": headers, "description": edit.description}, meta)
+        json.dump(
+            {
+                "ms": os.path.abspath(ms),
+                "headers": headers,
+                "description": edit.description,
+                "id": edit.id,
+                "op": op,
+            },
+            meta,
+        )
     for name in ("edit.npz", "journal.json"):
         _fsync(os.path.join(tmp, name))
     _fsync(os.path.join(tmp, "headers"))
@@ -300,13 +330,137 @@ def _put_cells(table, edit: "Edit", on: bool) -> None:
     recomputes it for those rows from FLAG. Either is idempotent, which is
     what lets recovery simply run the clear again.
     """
-    flag = np.array(table.getcol("FLAG", index=(edit.rows,)), dtype=bool)
-    flag[edit.changed] = on
-    table.putcol("FLAG", flag, index=(edit.rows,))
+    c0, c1 = edit.chan
+    chans = np.arange(c0, c1, dtype=np.int64)
+    for i0, i1, blob in edit.changed:
+        changed = _unpack(blob, (i1 - i0, c1 - c0, edit.ncorr))
+        if not changed.any():
+            continue
+        rows = edit.rows[i0:i1].copy()
+        flag = np.array(table.getcol("FLAG", index=(rows, chans)), dtype=bool)
+        flag[changed] = on
+        table.putcol("FLAG", flag, index=(rows, chans))
     if edit.row_set.size:
-        flag_row = np.array(table.getcol("FLAG_ROW", index=(edit.rows,)), dtype=bool)
-        flag_row[edit.row_set] = True if on else flag[edit.row_set].all(axis=(1, 2))
-        table.putcol("FLAG_ROW", flag_row, index=(edit.rows,))
+        rows = edit.rows[edit.row_set].copy()
+        if on:
+            flag_row = np.ones(rows.size, dtype=bool)
+        else:
+            flag_row = np.zeros(rows.size, dtype=bool)
+            for i0, i1 in _row_chunks(rows.size, table.getcol("FLAG", index=(rows[:1],)).shape[1:]):
+                part = rows[i0:i1].copy()
+                flag_row[i0:i1] = np.asarray(table.getcol("FLAG", index=(part,)), dtype=bool).all(axis=(1, 2))
+        table.putcol("FLAG_ROW", flag_row, index=(rows,))
+
+
+def _row_chunks(nrows: int, cell_shape: tuple[int, ...]) -> list[tuple[int, int]]:
+    """``[start, stop)`` row ranges of at most :data:`CHUNK_CELLS` cells each."""
+    step = max(1, CHUNK_CELLS // max(1, int(np.prod(cell_shape))))
+    return [(i0, min(i0 + step, nrows)) for i0 in range(0, nrows, step)]
+
+
+def _pack(mask: np.ndarray) -> bytes:
+    """A boolean mask as compressed bits: an edit's cells are mostly one block, so this is small."""
+    return zlib.compress(np.packbits(mask, axis=None).tobytes(), 1)
+
+
+def _unpack(blob: bytes, shape: tuple[int, ...]) -> np.ndarray:
+    bits = np.unpackbits(np.frombuffer(zlib.decompress(blob), np.uint8), count=int(np.prod(shape)))
+    return bits.reshape(shape).astype(bool)
+
+
+def _load_edit(path: str, meta: dict) -> "Edit":
+    """The edit a journal recorded."""
+    saved = np.load(os.path.join(path, "edit.npz"))
+    blob, offsets = saved["blob"], saved["offsets"]
+    changed = [
+        (int(i0), int(i1), blob[offsets[k] : offsets[k + 1]].tobytes()) for k, (i0, i1) in enumerate(saved["bounds"])
+    ]
+    return Edit(
+        id=int(meta.get("id", 0)),
+        rows=saved["rows"].astype(np.int64),
+        chan=(int(saved["chan"][0]), int(saved["chan"][1])),
+        ncorr=int(saved["ncorr"]),
+        changed=changed,
+        row_set=saved["row_set"],
+        cells=0,
+        newly_flagged=0,
+        description=meta["description"],
+    )
+
+
+def audit_path(ms: str) -> str:
+    """The audit log of ``ms`` (which may not exist yet)."""
+    return os.path.join(_versions_root(ms), AUDIT_LOG)
+
+
+def _who() -> str:
+    try:
+        user = getpass.getuser()
+    except Exception:  # noqa: BLE001 - no login name in some containers
+        user = "unknown"
+    return f"{user}@{socket.gethostname()}"
+
+
+def _utc(unix: float) -> str:
+    return datetime.fromtimestamp(unix, timezone.utc).isoformat(timespec="milliseconds").replace("+00:00", "Z")
+
+
+def log_entry(event: str, **fields) -> dict:
+    """An audit-log line: what happened, when and by whom."""
+    now = time.time()
+    return {"event": event, "time": _utc(now), "unix": now, "user": _who(), **fields}
+
+
+def append_log(ms: str, entry: dict) -> None:
+    """Append one line to the audit log, durably."""
+    path = audit_path(ms)
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    with open(path, "a") as log:
+        log.write(json.dumps(entry) + "\n")
+        log.flush()
+        os.fsync(log.fileno())
+
+
+def read_log(ms: str) -> list[dict]:
+    """Every entry in the audit log, oldest first; lines that do not parse are skipped."""
+    path = audit_path(ms)
+    try:
+        stat = os.stat(path)
+    except FileNotFoundError:
+        return []
+    return _read_log(path, stat.st_mtime_ns, stat.st_size)
+
+
+@functools.lru_cache(maxsize=4)
+def _read_log(path: str, mtime_ns: int, size: int) -> list[dict]:
+    entries = []
+    with open(path) as log:
+        for line in log:
+            try:
+                entry = json.loads(line)
+            except ValueError:
+                continue
+            if isinstance(entry, dict):
+                entries.append(entry)
+    return entries
+
+
+def outstanding(ms: str, field_id: int, spw: int, scan: int, since: float) -> list[dict]:
+    """The edits of one scan applied after ``since`` (unix seconds) and neither undone nor rolled back.
+
+    These are what make a heatmap written at ``since`` stale. Read from the
+    audit log, so edits by other sessions, and from before a restart, count.
+    """
+    entries = read_log(ms)
+    gone = {e.get("id") for e in entries if e.get("event") in ("undo", "rollback")}
+    return [
+        e
+        for e in entries
+        if e.get("event") == "apply"
+        and e.get("id") not in gone
+        and (e.get("field"), e.get("spw"), e.get("scan")) == (field_id, spw, scan)
+        and float(e.get("unix", 0)) > since
+    ]
 
 
 def recover(ms: str) -> str | None:
@@ -335,17 +489,7 @@ def recover(ms: str) -> str | None:
         return None
     with open(os.path.join(path, "journal.json")) as meta_file:
         meta = json.load(meta_file)
-    saved = np.load(os.path.join(path, "edit.npz"))
-    edit = Edit(
-        id=0,
-        rows=saved["rows"].astype(np.int64),
-        corr_idx=[],
-        changed=(saved["changed_row"], saved["changed_chan"], saved["changed_corr"]),
-        row_set=saved["row_set"],
-        cells=0,
-        newly_flagged=0,
-        description=meta["description"],
-    )
+    edit = _load_edit(path, meta)
 
     restored = []
     if not _opens(ms):
@@ -378,6 +522,14 @@ def recover(ms: str) -> str | None:
     for name in files:
         _fsync(os.path.join(ms, name))
     _fsync(ms)
+    # An interrupted apply is rolled back and an interrupted undo completed;
+    # the audit log says which, so the edit no longer counts as applied.
+    if meta.get("id"):
+        try:
+            event = "undo" if meta.get("op") == "undo" else "rollback"
+            append_log(ms, log_entry(event, id=meta["id"], description=meta["description"], at_recovery=True))
+        except OSError as exc:
+            print(f"surfvis: could not record the recovery in {audit_path(ms)}: {exc}", file=sys.stderr, flush=True)
     _clear_journal(ms)
     done = f"rolled back an interrupted flag edit ({meta['description']})"
     return done + (f"; restored {', '.join(restored)}, which the interruption had broken" if restored else "")
@@ -423,21 +575,30 @@ class Edit:
     """One applied selection: exactly the cells it changed, so undo touches nothing else."""
 
     id: int
+    # The rows the selection reaches: its scope's rows in the slots it covers.
     rows: np.ndarray
-    corr_idx: list[int]
-    # Indices into (rows, channel, correlation) of the FLAG cells this edit
-    # turned on. Cells already flagged are not recorded, so undo leaves them be.
-    changed: tuple[np.ndarray, np.ndarray, np.ndarray]
+    # The selection's channel range, [start, stop): the only channels read or written.
+    chan: tuple[int, int]
+    ncorr: int
+    # The FLAG cells this edit turned on, over (rows, channel range,
+    # correlation), as (start, stop, packed mask) per chunk of rows. Cells
+    # already flagged are not recorded, so undo leaves them be.
+    changed: list[tuple[int, int, bytes]]
     # Positions in ``rows`` whose FLAG_ROW this edit turned on.
     row_set: np.ndarray
     cells: int
     newly_flagged: int
     description: str
-    # Where: the partition and the baseline as the waterfall presents it.
+    # Where: the partition and the baseline of the panel it was drawn on.
     field: int = -1
     spw: int = -1
     scan: int = -1
     antennas: tuple[str, str] = ("", "")
+    # Which baselines: ``baseline`` (the panel's), ``antenna`` (every baseline
+    # of ``scope_antennas[0]``) or ``all`` (every baseline in the scan).
+    scope: str = "baseline"
+    scope_antennas: tuple[str, ...] = ()
+    baselines: int = 1
 
     def summary(self) -> dict:
         """What a client needs to name, find and undo this edit."""
@@ -448,9 +609,23 @@ class Edit:
             "spw": self.spw,
             "scan": self.scan,
             "antennas": list(self.antennas),
+            "scope": self.scope,
+            "scope_antennas": list(self.scope_antennas),
+            "baselines": self.baselines,
             "cells": self.cells,
             "newly_flagged": self.newly_flagged,
         }
+
+
+def _describe(scope: str, members: tuple[str, ...], field_id: int, spw: int, scan: int) -> str:
+    if scope == "all":
+        where = "all baselines"
+    elif scope == "antenna":
+        where = f"every baseline of {members[0]}"
+    else:
+        a, b = members
+        where = f"{a} auto" if a == b else f"{a}-{b}"
+    return f"{where} field {field_id} spw {spw} scan {scan}"
 
 
 @dataclass(eq=False)  # compared and hashed by identity: one per server
@@ -538,32 +713,44 @@ class Flagger:
         vertices: np.ndarray,
         corr_idx: list[int],
         dry_run: bool = False,
+        scope: str = "baseline",
+        antenna: str | None = None,
+        product: str = "",
     ) -> dict:
-        """Flag the cells of one baseline inside a polygon.
+        """Flag the cells inside a polygon drawn on one baseline's waterfall, over a scope.
 
         Args:
             field_id: FIELD_ID.
             spw: DATA_DESC_ID.
             scan: SCAN_NUMBER.
-            name1: First antenna's name.
+            name1: First antenna's name of the panel's baseline.
             name2: Second antenna's name.
             vertices: ``(k, 2)`` polygon in (time slot, channel) coordinates of
-                the waterfall, slots counted on the partition's time grid.
+                the waterfall, slots counted on the partition's time grid,
+                which every baseline of the scan shares.
             corr_idx: Correlations to flag, as positions in the partition's
                 ``polarization`` axis (the MS's FLAG for rows not stored reversed).
             dry_run: Count the cells without writing anything.
+            scope: ``baseline`` (the panel's), ``antenna`` (every baseline of
+                ``antenna``, its auto-correlation included) or ``all``.
+            antenna: For the antenna scope: one of the panel's two antennas.
+            product: The product the panel plotted, for the audit log.
 
         Returns:
             ``id`` (None for a dry run), ``cells`` selected, ``newly_flagged``
-            (selected cells that were not already flagged), and ``backup``.
+            (selected cells that were not already flagged), ``baselines``
+            reached, and ``backup``.
 
         Raises:
             KeyError: if the baseline has no rows in the partition.
-            ValueError: if the polygon is malformed or selects no cells.
+            ValueError: if the polygon is malformed, selects no cells, or the
+                scope is not one of :data:`SCOPES`.
             BackupPendingError: if the backup flag version is still being written.
         """
         from surfvis.web import msdata
 
+        if scope not in SCOPES:
+            raise ValueError(f"Unknown scope {scope!r}; expected one of {', '.join(SCOPES)}")
         if not corr_idx:
             raise ValueError("No correlations to flag")
         if not dry_run:
@@ -576,72 +763,145 @@ class Flagger:
             if not mask.any():
                 raise ValueError("The selection contains no cells")
 
-            # The rows the waterfall shows: the baseline as xarray-ms presents it,
-            # stored either way round.
+            # The rows the selection reaches. A baseline is as xarray-ms
+            # presents it; rows stored the other way round are marked reversed.
             name1, name2 = msdata.view_order(ds, name1, name2)
-            rows, times, flipped = msdata.baseline_rows(self.ms, field_id, spw, scan, name1, name2)
-            if rows.size == 0:
-                raise KeyError(f"No rows for {name1}-{name2} in field {field_id}, spw {spw}, scan {scan}")
+            if scope == "baseline":
+                members: tuple[str, ...] = (name1, name2)
+                rows, times, flipped = msdata.baseline_rows(self.ms, field_id, spw, scan, name1, name2)
+                nbaselines = 1
+                if rows.size == 0:
+                    raise KeyError(f"No rows for {name1}-{name2} in field {field_id}, spw {spw}, scan {scan}")
+            else:
+                if scope == "antenna" and antenna not in (name1, name2):
+                    raise ValueError(f"The antenna scope must name {name1} or {name2}, not {antenna!r}")
+                members = (antenna,) if scope == "antenna" else ()
+                rows, times, flipped, nbaselines = msdata.scope_rows(self.ms, field_id, spw, scan, ds, members or None)
+            slots = mask.any(axis=1)
             slot, hit = msdata.slot_index(grid, times)
-            touched = hit & mask[slot].any(axis=1)
+            touched = hit & slots[slot]
             rows, slot, flipped = rows[touched], slot[touched], flipped[touched]
             if rows.size == 0:
                 raise ValueError("The selection covers no time slots with data for this baseline")
 
+            # Only the selection's channel range is read and written.
+            chans_hit = np.flatnonzero(mask.any(axis=0))
+            c0, c1 = int(chans_hit[0]), int(chans_hit[-1]) + 1
+            chans = np.arange(c0, c1, dtype=np.int64)
+            sub = mask[:, c0:c1]
+            labels = [str(p) for p in ds.polarization.values]
+            ncorr = len(labels)
+            corr_sel = np.zeros(ncorr, dtype=bool)
+            corr_sel[list(corr_idx)] = True
+            # corr_idx is in the waterfall's order; a reversed row stores
+            # the cross-hands the other way round.
+            perm = msdata.reversed_correlations(labels) if flipped.any() else None
+            outside = np.ones(nchan, dtype=bool)
+            outside[c0:c1] = False
+
             import arcae
 
+            ncells = nnew = 0
+            changed_chunks: list[tuple[int, int, bytes]] = []
+            row_set: list[np.ndarray] = []
             table = arcae.table(self.ms)
             try:
-                flag = np.asarray(table.getcol("FLAG", index=(rows,)), dtype=bool)
                 flag_row = np.asarray(table.getcol("FLAG_ROW", index=(rows,)), dtype=bool)
+                for i0, i1 in _row_chunks(rows.size, (c1 - c0, ncorr)):
+                    part = rows[i0:i1].copy()
+                    flag = np.asarray(table.getcol("FLAG", index=(part, chans)), dtype=bool)
+                    cells = sub[slot[i0:i1]][..., None] & corr_sel
+                    fl = flipped[i0:i1]
+                    if perm is not None and fl.any():
+                        cells[fl] = cells[fl][..., perm]
+                    fr = flag_row[i0:i1]
+                    ncells += int(cells.sum())
+                    nnew += int((cells & ~(flag | fr[:, None, None])).sum())
+                    if dry_run:
+                        continue
+                    changed = cells & ~flag
+                    changed_chunks.append((i0, i1, _pack(changed)))
+                    # Rows the edit leaves fully flagged get FLAG_ROW; only ever set.
+                    full = np.flatnonzero(~fr & (flag | changed).all(axis=(1, 2)))
+                    if full.size and outside.any():
+                        keep = np.zeros(full.size, dtype=bool)
+                        for j0, j1 in _row_chunks(full.size, (nchan, ncorr)):
+                            whole = np.asarray(table.getcol("FLAG", index=(part[full[j0:j1]].copy(),)), dtype=bool)
+                            keep[j0:j1] = whole[:, outside].all(axis=(1, 2))
+                        full = full[keep]
+                    row_set.append(i0 + full)
             finally:
                 table.close()
-            # (row, channel) cells to set, broadcast over the chosen correlations.
-            cells = np.zeros(flag.shape, dtype=bool)
-            cells[..., corr_idx] = mask[slot][..., None]
-            if flipped.any():
-                # corr_idx is in the waterfall's order; a reversed row stores
-                # the cross-hands the other way round.
-                labels = [str(p) for p in ds.polarization.values]
-                cells[flipped] = cells[flipped][..., msdata.reversed_correlations(labels)]
-            already = flag | flag_row[:, None, None]
             summary = {
-                "cells": int(cells.sum()),
-                "newly_flagged": int((cells & ~already).sum()),
+                "cells": ncells,
+                "newly_flagged": nnew,
+                "baselines": nbaselines,
+                "scope": scope,
                 "backup": self.backup,
             }
             if dry_run:
                 return {"id": None, **summary}
 
-            changed = cells & ~flag
-            # Only ever set: a row flagged through FLAG_ROW alone stays flagged.
-            new_row = flag_row | (flag | changed).all(axis=(1, 2))
+            description = _describe(scope, members, field_id, spw, scan)
             edit = Edit(
                 id=self._next_id,
                 rows=rows,
-                corr_idx=list(corr_idx),
-                changed=tuple(i.astype(np.int32) for i in np.nonzero(changed)),
-                row_set=np.flatnonzero(new_row & ~flag_row),
-                cells=summary["cells"],
-                newly_flagged=summary["newly_flagged"],
-                description=f"{name1 + ' auto' if name1 == name2 else name1 + '-' + name2} "
-                f"field {field_id} spw {spw} scan {scan}",
+                chan=(c0, c1),
+                ncorr=ncorr,
+                changed=changed_chunks,
+                row_set=np.concatenate(row_set) if row_set else np.zeros(0, np.int64),
+                cells=ncells,
+                newly_flagged=nnew,
+                description=description,
                 field=field_id,
                 spw=spw,
                 scan=scan,
                 antennas=(name1, name2),
+                scope=scope,
+                scope_antennas=members,
+                baselines=nbaselines,
             )
-            self._write(edit, on=True)
+            covered = np.flatnonzero(slots)
+            t0, t1 = float(grid[covered[0]]), float(grid[covered[-1]])
+            freqs = ds.frequency.values
+            entry = log_entry(
+                "apply",
+                id=edit.id,
+                description=description,
+                ms=os.path.abspath(self.ms),
+                backup=self.backup,
+                field=field_id,
+                spw=spw,
+                scan=scan,
+                scope=scope,
+                antennas=list(members),
+                panel=[name1, name2],
+                baselines=nbaselines,
+                rows=int(rows.size),
+                product=product,
+                correlations=[labels[i] for i in corr_idx],
+                vertices=[[float(t), float(c)] for t, c in np.asarray(vertices, dtype=float)],
+                slots=[int(covered[0]), int(covered[-1])],
+                channels=[c0, c1 - 1],
+                times_utc=[_utc(t0 - _MJD_UNIX), _utc(t1 - _MJD_UNIX)],
+                times_mjd=[t0, t1],
+                freqs_hz=[float(freqs[c0]), float(freqs[c1 - 1])],
+                cells=ncells,
+                newly_flagged=nnew,
+            )
+            self._write(edit, on=True, entry=entry)
             self._record(edit)
             return {**edit.summary(), **summary}
 
-    def _write(self, edit: Edit, on: bool) -> None:
+    def _write(self, edit: Edit, on: bool, entry: dict | None = None) -> None:
         """Set or clear an edit's cells, journalled; on failure, put the MS back as it was before the edit.
 
         The journal is on disk before the first byte of the MS changes and is
         retired only once the storage managers' files are fsynced, so from a
         crash anywhere in between :func:`recover` restores a broken header and
-        rolls the edit back.
+        rolls the edit back. ``entry`` goes into the audit log before the
+        journal is retired: a crash after it is recorded by recovery as a
+        rollback, so the log never claims an edit the MS does not hold.
 
         Raises:
             RuntimeError: if an earlier failure could not be put back.
@@ -657,7 +917,7 @@ class Flagger:
             table = arcae.table(self.ms, readonly=False)
             try:
                 headers, files = _storage_files(self.ms, table)
-                _write_journal(self.ms, edit, headers)
+                _write_journal(self.ms, edit, headers, "apply" if on else "undo")
             except BaseException:
                 table.close()
                 raise
@@ -669,6 +929,8 @@ class Flagger:
                 for name in files:
                     _fsync(os.path.join(self.ms, name))
                 _fsync(self.ms)
+                if entry is not None:
+                    append_log(self.ms, entry)
                 _clear_journal(self.ms)
             except BaseException as exc:
                 self._put_back(exc)
@@ -717,7 +979,7 @@ class Flagger:
                     f"({edit.newly_flagged} cells) was flagged since, perhaps in another tab"
                 )
             try:
-                self._write(edit, on=False)
+                self._write(edit, on=False, entry=log_entry("undo", id=edit.id, description=edit.description))
             except Exception as exc:
                 # Putting a failed undo back clears the edit's cells, which is the undo.
                 if getattr(exc, "rolled_back", False):

@@ -462,8 +462,13 @@ def test_undo_keeps_flags_written_since(chi2_zarr, writable_ms):
     original, _ = _flags(writable_ms)
     flagger = Flagger(writable_ms)
     out = flagger.apply(0, 0, 1, names[0], names[2], np.array(_rect(0, 4, 0, 9)), corr_idx=[0, 3])
-    # Only the cells it changed are kept for undo, not whole rows.
-    assert sum(i.size for i in flagger.edits[-1].changed) == 3 * out["newly_flagged"]
+    # Only the cells it changed are kept for undo, not whole rows: a mask over the selection's channels.
+    from surfvis.web.flagging import _unpack
+
+    edit = flagger.edits[-1]
+    assert edit.chan == (0, 10)
+    changed = sum(_unpack(blob, (i1 - i0, 10, edit.ncorr)).sum() for i0, i1, blob in edit.changed)
+    assert changed == out["newly_flagged"]
 
     with table(writable_ms, readonly=False, ack=False) as t:
         flag = t.getcol("FLAG")
@@ -630,14 +635,17 @@ def test_recovery_is_idempotent_and_leaves_newer_flags(chi2_zarr, writable_ms):
     from casacore.tables import table
 
     from surfvis.web import flagging
-    from surfvis.web.flagging import Edit, _write_journal
+    from surfvis.web.flagging import Edit, _pack, _write_journal
 
     rows = _baseline_rows(writable_ms, 0, 2, scan=1)[:2]
+    changed = np.zeros((2, 3, 4), bool)  # channels 4-6
+    changed[:, 1, 0] = True  # channel 5, the first correlation
     edit = Edit(
         id=1,
         rows=rows.astype(np.int64),
-        corr_idx=[0],
-        changed=(np.array([0, 1], np.int32), np.array([5, 5], np.int32), np.array([0, 0], np.int32)),
+        chan=(4, 7),
+        ncorr=4,
+        changed=[(0, 2, _pack(changed))],
         row_set=np.array([], np.int64),
         cells=2,
         newly_flagged=2,
@@ -649,7 +657,7 @@ def test_recovery_is_idempotent_and_leaves_newer_flags(chi2_zarr, writable_ms):
         flag[rows, 6, 1] = True  # what someone else wrote
         t.putcol("FLAG", flag)
     for _ in range(2):
-        _write_journal(writable_ms, edit, [])
+        _write_journal(writable_ms, edit, [], "apply")
         assert "by hand" in flagging.recover(writable_ms)
         after, _ = _flags(writable_ms)
         assert not after[rows, 5, 0].any() and after[rows, 6, 1].all()

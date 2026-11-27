@@ -1,4 +1,5 @@
 import { Carry } from "./carry.mjs";
+import { staleCells, staleNote } from "./stale.mjs";
 
 // Behaviour htmx does not cover: loading feedback, the selected baseline,
 // the hover readout, keyboard navigation, and carrying waterfall settings
@@ -83,6 +84,41 @@ document.body.addEventListener("htmx:afterSettle", (e) => {
     document.getElementById("waterfall").replaceChildren(hint);
     carry.reset(); // no panel, so nothing to carry, as before a first click
   }
+});
+
+// Cells whose chi-squared predates manual edits get a marker, and the header
+// says how many (stale.mjs). Rendered with the heatmap, and fetched again
+// whenever the waterfall applies or undoes an edit.
+function markStale(stale) {
+  const data = gridData();
+  if (!data) return;
+  const cells = staleCells(stale, data.names);
+  const n = data.names.length;
+  document.querySelectorAll(".grid i").forEach((cell, k) => {
+    cell.classList.toggle("stale", cells.has(`${Math.floor(k / n)},${k % n}`));
+  });
+  const note = document.getElementById("stale-note");
+  if (note) {
+    note.textContent = staleNote(stale);
+    note.hidden = !note.textContent;
+  }
+}
+
+document.body.addEventListener("htmx:afterSettle", (e) => {
+  if (e.detail.target.id === "heatmap") markStale(gridData()?.stale);
+});
+
+document.addEventListener("surfvis:flagged", async () => {
+  const where = gridData()?.where;
+  if (!where) return;
+  try {
+    const res = await fetch(`/stale?${new URLSearchParams(where)}`);
+    if (!res.ok) return;
+    const stale = await res.json();
+    const now = gridData()?.where;
+    // Only if the heatmap on screen is still the one asked about.
+    if (now && now.field === where.field && now.spw === where.spw && now.scan === where.scan) markStale(stale);
+  } catch (_) {}
 });
 
 // The waterfall panel is drawn by static/wf/widget.mjs; mount it whenever the panel is (re)rendered.

@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { Selection, confirmLabel, undoLabel, sameBaseline, DRAG_PX } from "../../src/surfvis/web/static/wf/selection.mjs";
+import { Selection, confirmLabel, undoLabel, sameBaseline, scopeParams, DRAG_PX } from "../../src/surfvis/web/static/wf/selection.mjs";
 
 // One cell per 10 px, slot axis pointing down the screen (as near enough for these tests).
 const toScreen = (t, c) => ({ x: c * 10, y: t * 10 });
@@ -137,4 +137,22 @@ test("an edit is on the panel's baseline in either order, in the same partition"
   assert.ok(sameBaseline(edit, ctx, "m002", "m000"));
   assert.ok(!sameBaseline(edit, { ...ctx, scan: 2 }, "m000", "m002"));
   assert.ok(!sameBaseline(edit, ctx, "m000", "m003"));
+});
+
+test("wider scopes: labels, which panels an edit covers, and the /flag fields", () => {
+  const antenna = { antennas: ["m000", "m002"], scope: "antenna", scope_antennas: ["m002"], scan: 1, newly_flagged: 9, field: 0, spw: 0 };
+  const all = { ...antenna, scope: "all", scope_antennas: [] };
+  assert.equal(undoLabel(antenna), "Undo every baseline of m002, scan 1, 9 cells");
+  assert.equal(undoLabel(all), "Undo all baselines, scan 1, 9 cells");
+  const ctx = { field: 0, spw: 0, scan: 1 };
+  assert.ok(sameBaseline(antenna, ctx, "m002", "m005"));
+  assert.ok(sameBaseline(antenna, ctx, "m002", "m002"));
+  assert.ok(!sameBaseline(antenna, ctx, "m001", "m005"));
+  assert.ok(sameBaseline(all, ctx, "m001", "m005"));
+  assert.ok(!sameBaseline(all, { ...ctx, scan: 2 }, "m001", "m005"));
+  assert.match(confirmLabel({ cells: 20, newly_flagged: 20, correlations: ["XX"], baselines: 28 }), /· 28 baselines$/);
+  assert.doesNotMatch(confirmLabel({ cells: 20, newly_flagged: 20, correlations: ["XX"], baselines: 1 }), /baselines/);
+  assert.deepEqual(scopeParams("baseline"), { baselines: "baseline" });
+  assert.deepEqual(scopeParams("antenna:4"), { baselines: "antenna", antenna: 4 });
+  assert.deepEqual(scopeParams("all"), { baselines: "all" });
 });

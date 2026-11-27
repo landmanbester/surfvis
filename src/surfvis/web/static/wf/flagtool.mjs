@@ -7,7 +7,7 @@
 // is a preview and the counts come from a dry run.
 
 import { rasterise } from "./select.mjs";
-import { Selection, confirmLabel, undoLabel, sameBaseline } from "./selection.mjs";
+import { Selection, confirmLabel, undoLabel, sameBaseline, scopeParams } from "./selection.mjs";
 
 const FILL = "rgba(224, 48, 150, 0.35)";
 const LINE = "#e03096";
@@ -48,6 +48,8 @@ export function attach(root, api) {
   const view = api.view;
   const sel = new Selection(view.ntime, view.nchan);
   const allCorr = root.querySelector(".wf-allcorr");
+  // Which baselines: rendered as "this one" with every panel, never carried.
+  const scope = root.querySelector(".wf-scope");
   const applyBtn = root.querySelector(".wf-apply");
   const undoBtn = root.querySelector(".wf-undo");
   const status = root.querySelector(".wf-flagstatus");
@@ -86,6 +88,7 @@ export function attach(root, api) {
       ...ctx,
       vertices: sel.vertices,
       correlations: allCorr.checked ? "all" : "product",
+      ...scopeParams(scope.value),
       ...extra,
     };
   }
@@ -155,6 +158,8 @@ export function attach(root, api) {
       spans = null;
       dry = null;
       say(`Flagged ${out.newly_flagged.toLocaleString("en-US")} new cells.`);
+      // The heatmap marks what this edit made stale.
+      document.dispatchEvent(new CustomEvent("surfvis:flagged"));
       await api.reload();
     } catch (err) {
       say(err.message, true);
@@ -175,6 +180,7 @@ export function attach(root, api) {
     try {
       await postJSON("/flag/undo", { id: edit.id });
       say(`Undid ${edit.description}.`);
+      document.dispatchEvent(new CustomEvent("surfvis:flagged"));
       if (sameBaseline(edit, ctx, name1, name2)) await api.reload();
     } catch (err) {
       say(err.message, true);
@@ -350,14 +356,16 @@ export function attach(root, api) {
     },
     { signal: life },
   );
-  allCorr.addEventListener(
-    "change",
-    () => {
-      allCorr.blur();
-      if (sel.mode === "pending") onPending();
-    },
-    { signal: life },
-  );
+  for (const control of [allCorr, scope]) {
+    control.addEventListener(
+      "change",
+      () => {
+        control.blur();
+        if (sel.mode === "pending") onPending();
+      },
+      { signal: life },
+    );
+  }
   life.addEventListener("abort", () => clearTimeout(pollTimer));
 
   loadState().then(() => {
