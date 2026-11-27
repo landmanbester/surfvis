@@ -3,10 +3,20 @@ type: log
 title: Wiki changelog
 description: Chronological record of what changed in the wiki and why.
 timestamp: 2026-11-27
-last_verified_commit: c26cd15
+last_verified_commit: b17b49a
 ---
 
 # Wiki changelog
+
+## 2026-11-27 — wider scopes, audit log, stale heatmaps (verified at `b17b49a`)
+
+- **web-app.md:** step 4 of #16: a selection's scope (the panel's baseline,
+  every baseline of one of its antennas, or every baseline in the scan),
+  one edit per selection; edits stored as compressed bit masks over the
+  selection's channel range, written in chunks; the audit log
+  (`surfvis_flags.jsonl`) and how the journal keeps it honest across a
+  crash; the zarr's `created` attr and the heatmap's stale markers.
+  `GLOSSARY.md` redefines edit and scope and adds audit log and stale.
 
 ## 2026-11-27 — auto-correlation waterfalls (verified at `c26cd15`)
 

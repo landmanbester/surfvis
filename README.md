@@ -396,13 +396,25 @@ you can flag by hand on a baseline's waterfall
 
 A closed selection is only shaded and counted; nothing is written until you
 confirm it. "All correlations" (on by default) flags every correlation of the
-baseline; untick it to flag only those the plotted product is formed from. A
+baseline; untick it to flag only those the plotted product is formed from.
+"Baselines" widens a selection to every baseline of one of the panel's
+antennas (its auto-correlation included) or to every baseline in the scan;
+it resets to "this one" on every new panel, and the Flag button says how
+many baselines it will touch. Whatever its scope, one selection is one edit
+and one undo. A
 pending selection follows you to the next baseline of the same scan, so one
 patch of RFI can be flagged across baselines with the arrow keys and Enter.
 Drawing is disabled while the flags menu shows a saved flag version. Before
 its first write, a flagging session saves FLAG as a CASA flag version named
 `surfvis_before_<UTC timestamp>`, so `flagmanager` (or the flags menu) can
 restore it.
+
+Every edit, undo and rollback is appended to an audit log,
+`<ms>.flagversions/surfvis_flags.jsonl`: one JSON line saying when, who,
+where, the scope, the polygon (in slots and channels, and as UTC times and
+frequencies) and how many cells changed. The heatmap reads it: in a scan
+with edits newer than its `chi2` run, the header says so and the cells
+those edits touched get a corner mark, until `chi2` is run again.
 
 A crash, `kill -9` or power cut in the middle of a write cannot leave the MS
 unopenable or an edit half-applied. Every write is journalled in

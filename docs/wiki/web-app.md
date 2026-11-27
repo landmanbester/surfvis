@@ -4,7 +4,7 @@ title: Chi-squared browser
 description: How surfvis serve links surfchi2 output to on-demand baseline waterfalls, the waterfall's correction / Stokes / flag-version controls, and the xarray-ms facts it depends on.
 tags: [web, fastapi, htmx, xarray-ms, zarr]
 timestamp: 2026-11-27
-last_verified_commit: c26cd15
+last_verified_commit: b17b49a
 ---
 
 # Chi-squared browser
@@ -42,7 +42,9 @@ One group per `(field, spw, scan)`, holding that scan's totals:
 chi2.zarr/field{F}/spw{S}/scan{N}
   chi2, counts        (product, antenna1, antenna2), summed over the scan
   attrs               ms, rcol, wcol, fcol, mcol, gtable, corr_labels, antenna_names,
-                      autocorrelations (whether the scan has any; absent before c26cd15)
+                      autocorrelations (whether the scan has any; absent before c26cd15),
+                      created (unix time chi2 started, before it read FLAG; absent before
+                      step 4 of #16, when the zarr directory's mtime stands in)
 ```
 
 The browser looks at one field, spw and scan at a time. `--ntimes` and
@@ -301,8 +303,15 @@ and the selection tool in `static/wf/` (see "Selection on the canvas"). Terms
   `t - 0.5` / `c + 0.5`. The server's mask is what is written; a client preview
   must use the same rule.
 - **`POST /flag`** takes `{field, spw, scan, p, q, product, vertices,
-  correlations, gtable, flagversion, dry_run}`: the polygon plus the panel's
-  settings it was drawn on. `correlations` is `all` (the default: one flagged
+  correlations, baselines, antenna, gtable, flagversion, dry_run}`: the
+  polygon plus the panel's settings it was drawn on. `baselines` is the
+  scope (step 4): `baseline` (the default, the panel's), `antenna` (every
+  baseline of `antenna`, an index that must be `p` or `q`, else 400; its
+  auto-correlation included) or `all` (every row of the scan, autos too).
+  Every baseline of a scan shares its time grid and channels, so the same
+  mask applies to each; wide scopes stay inside the scan.
+  `msdata.scope_rows` finds their rows and marks each `reversed` when it is
+  stored the other way round from how xarray-ms presents its baseline. `correlations` is `all` (the default: one flagged
   correlation should flag them all) or `product`, the correlations the plotted
   product is formed from, by the waterfall's own rule
   (`msdata.product_correlations`): XX and YY for I, and all four for
@@ -344,11 +353,20 @@ and the selection tool in `static/wf/` (see "Selection on the canvas"). Terms
   an older edit cannot undo another tab's newer one. Edit ids are
   microseconds since the epoch, so they are unique across restarts too.
   Apply, undo and `/flag/state` report each edit's `Edit.summary()`: id,
-  description, field, spw, scan, `antennas` (in the waterfall's order) and
-  cell counts. An edit records the changed cells'
-  indices, not row snapshots: snapshots both wiped later writes by
-  `flag-chi2`, CASA or another server, and cost ~59 MB per MeerKAT
-  baseline-scan. The stack is per process; the backup version is the durable
+  description, field, spw, scan, `antennas` (the panel's baseline, in the
+  waterfall's order), `scope`, `scope_antennas`, `baselines` and cell
+  counts. One selection is one edit and one undo, whatever its scope. An
+  edit records the cells it changed, not row snapshots: snapshots both wiped
+  later writes by `flag-chi2`, CASA or another server, and cost ~59 MB per
+  MeerKAT baseline-scan. It holds them as a bit mask over (its rows, the
+  selection's channel range, correlation), zlib-compressed per chunk of
+  rows (`Edit.changed`): cell indices cost 12 bytes per cell, hundreds of GB
+  for a full-band rectangle over every baseline of a MeerKAT scan, and the
+  mask of a polygon compresses to almost nothing. Reads and writes go in
+  chunks of `CHUNK_CELLS` (2^24) and touch only the selection's channels
+  (arcae takes a channel index); FLAG_ROW needs the rest of a row, read only
+  for rows the selection leaves fully flagged within its channels. A test
+  pins that a 37-cell chunk size writes what one chunk does. The stack is per process; the backup version is the durable
   fallback. `GET /flag/state` lists the edits. Apply and undo share one
   idempotent operation, `_put_cells(table, edit, on)`.
 - **Crash safety: the journal.** casacore flushes a TiledShapeStMan (where
@@ -374,6 +392,29 @@ and the selection tool in `static/wf/` (see "Selection on the canvas"). Terms
   recovery at once; if that fails too, `Flagger.broken` is set and writes are
   refused until a restart. 25 random `kill -9`s during a stream of edits (7
   of them mid-write) left every MS openable and no edit half-applied.
+- **Audit log.** Every apply, undo and recovery rollback appends one JSON
+  line to `<ms>.flagversions/surfvis_flags.jsonl` (fsynced), so a session's
+  manual flags can be reviewed or replayed. An apply records time, user@host,
+  edit id, backup, field/spw/scan, scope and its antennas, the panel's
+  baseline, product, correlations, vertices, the slot and channel ranges and
+  their UTC/MJD times and frequencies, and cell counts; undo and rollback
+  name the id. The line is written after the storage managers are fsynced
+  and before the journal is retired, and the journal records the edit's id
+  and whether it was an apply or an undo: recovery from a crash after the
+  line appends `rollback` (or completes the undo and appends `undo`), so the
+  log never claims an edit the MS does not hold. A failed log write fails the
+  edit and puts it back.
+- **Stale heatmaps.** `flagging.outstanding(ms, field, spw, scan, since)` is
+  the scan's applies after `since`, less any undone or rolled back; `since`
+  is the zarr's `created`. `GET /stale` summarises it as `{edits, all,
+  antennas, baselines}`, which the heatmap also embeds in `#grid-data`.
+  `static/stale.mjs` turns it into the cells to mark (both triangles; an
+  antenna's row and column) and the header note; `app.js` marks them on
+  every heatmap render and fetches `/stale` again on `surfvis:flagged`,
+  which `flagtool.mjs` dispatches after an apply or undo. Reading the log
+  rather than the process's stack means edits by other sessions and from
+  before a restart count, and a `chi2` re-run clears them. A read-only
+  `serve` shows them too.
 - **Never open a possibly broken MS in the server process.** `_opens()`
   probes in a child process: a failed arcae open of the broken MS left a read
   lock in casacore's in-process lock registry (`FileLocker::acquire` waits on
@@ -574,7 +615,15 @@ JSON `/flag` needs: field, spw, scan, p, q, product, gtable, flagversion) and
   1e-3 catch a reordered interpolation, which plain integer cases did not).
   Counts come from a `/flag` dry run, which also returns the correlation
   names for the label. No cells, or a failed count, leaves nothing to
-  confirm. Changing "all correlations" or undoing re-counts.
+  confirm. Changing "all correlations" or "baselines", or undoing,
+  re-counts. A wide scope's label adds `· N baselines`, and the undo label
+  names the scope.
+- **Scope menu** (`.wf-scope`): "this one", "every baseline of" each of the
+  panel's antennas (one on an auto panel) and "all baselines". It has no
+  `name`, so it is neither part of the panel's form nor carried: every
+  panel starts at "this one", so a wide scope cannot follow you to the next
+  baseline. A carried pending selection is still carried; it is the scope
+  that resets.
 - **After apply or undo** the waterfall re-fetches in place (`api.reload`),
   keeping zoom and colours; an undo of another baseline only reports.
 - **Carrying.** A pending selection is module state in `flagtool.mjs`, carried

@@ -49,7 +49,7 @@ docker run --rm --user "$(id -u):$(id -g)" -e HOME=/tmp -v "$PWD":/src -w /src \
    PYTHONPATH=/tmp/t:/src/src:/src /tmp/t/bin/pytest tests/ -q -W ignore"
 ```
 
-That is the only way to run the full suite (119 tests; the node one skips in the container). **CI does not run them** —
+That is the only way to run the full suite (127 tests; the node one skips in the container). **CI does not run them** —
 `.github/workflows/ci.yml` installs the lightweight package only, deliberately,
 since python-casacore and numba make CI slow and brittle. Verify locally.
 
@@ -81,7 +81,7 @@ Three layers, and the boundary between them is load-bearing:
 - **`web/`** is the browser: `store.py` (zarr), `msdata.py` (MS via xarray-ms
   and arcae), `render.py` (colours + PNGs), `planes.py` (waterfall reduction), `profiling.py` (`serve --profile`), `app.py` (FastAPI), `templates/`
   (htmx partials) and `static/app.js` (selection, hover readout, arrow keys,
-  carried settings via `static/carry.mjs`, loading states, Save as PNG; a module), and `static/wf/` (the canvas waterfall as ES modules, node-tested via `tests/test_js.py`; node is not in the container). `htmx.min.js` and
+  carried settings via `static/carry.mjs`, stale markers via `static/stale.mjs`, loading states, Save as PNG; a module), and `static/wf/` (the canvas waterfall as ES modules, node-tested via `tests/test_js.py`; node is not in the container). `htmx.min.js` and
   `html-to-image.js` are vendored, not loaded from a CDN: compute nodes are
   often offline. Dask-free. `flagging.py` is the one write path (below).
 - **`utils/products.py` and `utils/gains.py`** are the exception to "utils is
@@ -304,9 +304,16 @@ keep an undo stack. The canvas draws selections (`static/wf/selection.mjs`
 for the gestures, `select.mjs` for the cell rule, `flagtool.mjs` for the
 wiring); `select.mjs` must agree with `flagging.rasterise` cell for cell,
 which `tests/js/rasterise_cases.json` pins. No single key press or gesture
-may both close a selection and write it. Next is step 4 of #16: wider
-scopes, the audit log, marking the heatmap stale. Any new write to the MS
-goes through `Flagger`.
+may both close a selection and write it. A selection's scope is the panel's
+baseline, an antenna's baselines or the whole scan, and is one edit however
+wide: an edit holds the cells it changed as compressed bit masks over the
+selection's channel range, written in row chunks, never as cell indices.
+Every edit, undo and rollback goes into the audit log
+(`<ms>.flagversions/surfvis_flags.jsonl`), written before the journal is
+retired, and the heatmap derives its stale markers from it
+(`flagging.outstanding`, `static/stale.mjs`) against the zarr's `created`.
+Next is step 5 of #16 (optional): recompute χ² for the stale cells. Any new
+write to the MS goes through `Flagger`.
 
 ## Agent skills
 
