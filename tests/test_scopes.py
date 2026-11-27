@@ -113,6 +113,88 @@ def test_all_baselines_is_one_edit_and_one_undo(ms):
 
 
 @needs_web
+def test_undo_leaves_flag_row_of_rows_it_did_not_change(ms):
+    """A row fully flagged in FLAG but not FLAG_ROW, as many flaggers leave one, is left exactly as found."""
+    from casacore.tables import table
+
+    with table(ms, readonly=False, ack=False) as t:
+        flag = t.getcol("FLAG")
+        flag[13] = True
+        t.putcol("FLAG", flag)
+    cols = _columns(ms)
+    assert not cols["FLAG_ROW"][13]
+    grid = np.unique(cols["TIME"][cols["SCAN_NUMBER"] == 1])
+    slot = int(np.searchsorted(grid, cols["TIME"][13]))
+    flagger = _flagger(ms)
+    flagger.apply(0, 0, 1, "m000", "m001", np.array(_rect(slot, slot, 0, 31)), [0, 1, 2, 3], scope="all")
+    assert not _columns(ms)["FLAG_ROW"][13]
+    flagger.undo()
+    after = _columns(ms)
+    np.testing.assert_array_equal(after["FLAG"], cols["FLAG"])
+    np.testing.assert_array_equal(after["FLAG_ROW"], cols["FLAG_ROW"])
+
+
+@needs_web
+def test_counts_and_refusals(ms, monkeypatch):
+    """Baselines count those the selection reaches; large dry runs skip FLAG; a no-op is refused."""
+    from casacore.tables import table
+
+    from surfvis.web import flagging
+
+    with table(ms, readonly=False, ack=False) as t:
+        a1, a2, times, scans = t.getcol("ANTENNA1"), t.getcol("ANTENNA2"), t.getcol("TIME"), t.getcol("SCAN_NUMBER")
+        grid = np.unique(times[scans == 1])
+        gone = np.flatnonzero((a1 == 2) & (a2 == 6) & np.isin(times, grid[[3, 4]]))
+        t.removerows(gone.tolist())
+    flagger = _flagger(ms)
+    dry = flagger.apply(
+        0, 0, 1, "m002", "m006", np.array(_rect(3, 4, 0, 5)), [0], dry_run=True, scope="antenna", antenna="m006"
+    )
+    assert dry["baselines"] == 7, "m002-m006 has no rows in those slots"
+
+    exact = flagger.apply(0, 0, 1, "m000", "m001", np.array(_rect(0, 5, 0, 31)), [0, 3], dry_run=True, scope="all")
+    monkeypatch.setattr(flagging, "DRY_RUN_CELLS", 100)
+    rough = flagger.apply(0, 0, 1, "m000", "m001", np.array(_rect(0, 5, 0, 31)), [0, 3], dry_run=True, scope="all")
+    assert rough["newly_flagged"] is None and rough["cells"] == exact["cells"] and exact["newly_flagged"] is not None
+
+    flagger.apply(0, 0, 1, "m000", "m001", np.array(_rect(1, 2, 3, 4)), [0])
+    with pytest.raises(ValueError, match="Nothing new"):
+        flagger.apply(0, 0, 1, "m000", "m001", np.array(_rect(1, 2, 3, 4)), [0])
+    assert len(flagger.edits) == 1
+
+
+@needs_web
+def test_a_journal_from_before_step_4_is_recovered(ms):
+    """A journal listing cell indices, as step 3 wrote them, still rolls back."""
+    import json as json_
+    import os
+
+    from surfvis.web import flagging
+
+    cols = _columns(ms)
+    rows = np.flatnonzero((cols["ANTENNA1"] == 0) & (cols["ANTENNA2"] == 1))[:2].astype(np.int64)
+    flagging._fsync  # noqa: B018 - the module is importable
+    with __import__("casacore.tables", fromlist=["table"]).table(ms, readonly=False, ack=False) as t:
+        flag = t.getcol("FLAG")
+        flag[rows, 7, 1] = True
+        t.putcol("FLAG", flag)
+    path = os.path.join(flagging._versions_root(ms), flagging.JOURNAL)
+    os.makedirs(os.path.join(path, "headers"))
+    np.savez(
+        os.path.join(path, "edit.npz"),
+        rows=rows,
+        changed_row=np.array([0, 1], np.int32),
+        changed_chan=np.array([7, 7], np.int32),
+        changed_corr=np.array([1, 1], np.int32),
+        row_set=np.array([], np.int64),
+    )
+    with open(os.path.join(path, "journal.json"), "w") as meta:
+        json_.dump({"ms": ms, "headers": [], "description": "old"}, meta)
+    assert "old" in flagging.recover(ms)
+    np.testing.assert_array_equal(_columns(ms)["FLAG"], cols["FLAG"])
+
+
+@needs_web
 def test_chunks_and_channel_ranges_write_the_same_cells(ms, tmp_path, monkeypatch):
     """Rows go in chunks and only the selection's channels are read; neither changes what is written."""
     from surfvis.web import flagging
@@ -200,6 +282,9 @@ def test_the_audit_log_records_applies_undos_and_rollbacks(ms):
     assert [e["id"] for e in flagging.outstanding(ms, 0, 0, 1, since=0)] == [first["id"]]
     assert flagging.outstanding(ms, 0, 0, 2, since=0) == []
     assert flagging.outstanding(ms, 0, 0, 1, since=entries[-1]["unix"]) == []
+    # chi2 between an apply and its undo saw flags FLAG no longer holds: stale too.
+    between = (entries[1]["unix"] + entries[2]["unix"]) / 2
+    assert [e["id"] for e in flagging.outstanding(ms, 0, 0, 1, since=between)] == [second["id"]]
 
     # An edit interrupted after it was logged is rolled back at recovery, and the log says so.
     edit = flagger.edits[-1]

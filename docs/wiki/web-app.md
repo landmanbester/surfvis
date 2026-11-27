@@ -366,7 +366,19 @@ and the selection tool in `static/wf/` (see "Selection on the canvas"). Terms
   chunks of `CHUNK_CELLS` (2^24) and touch only the selection's channels
   (arcae takes a channel index); FLAG_ROW needs the rest of a row, read only
   for rows the selection leaves fully flagged within its channels. A test
-  pins that a 37-cell chunk size writes what one chunk does. The stack is per process; the backup version is the durable
+  pins that a 37-cell chunk size writes what one chunk does. FLAG_ROW is set
+  only on rows the edit changed: a row already fully flagged in FLAG but not
+  FLAG_ROW (as many flaggers leave one) used to get FLAG_ROW, which undo
+  then kept, across a whole scan for scope `all`. An apply that would change
+  nothing is refused (400). A journal in step 3's format (cell indices) is
+  still recovered.
+- **Dry runs on wide scopes.** A full-band rectangle over every baseline of
+  a MeerKAT scan is ~1e11 cells: reading FLAG to count it takes minutes,
+  twice (dry run, then apply). Above `DRY_RUN_CELLS` (2^26) a dry run
+  returns the cells selected with `newly_flagged: null` and the button
+  reads "Flag up to N cells"; the apply reports the real count. Dry runs do
+  not take the `Flagger` lock, and the browser aborts a superseded one.
+  `baselines` counts those with rows in the selected slots. The stack is per process; the backup version is the durable
   fallback. `GET /flag/state` lists the edits. Apply and undo share one
   idempotent operation, `_put_cells(table, edit, on)`.
 - **Crash safety: the journal.** casacore flushes a TiledShapeStMan (where
@@ -405,8 +417,12 @@ and the selection tool in `static/wf/` (see "Selection on the canvas"). Terms
   log never claims an edit the MS does not hold. A failed log write fails the
   edit and puts it back.
 - **Stale heatmaps.** `flagging.outstanding(ms, field, spw, scan, since)` is
-  the scan's applies after `since`, less any undone or rolled back; `since`
-  is the zarr's `created`. `GET /stale` summarises it as `{edits, all,
+  the scan's applies after `since` not since undone or rolled back, plus
+  those applied before `since` and undone after it (`chi2` saw flags FLAG
+  no longer holds); `since` is the zarr's `created`. For an older zarr the
+  directory's mtime stands in, which is when `chi2` finished, so an edit
+  made while it ran is missed; both rely on `chi2` and `serve` sharing a
+  clock. `GET /stale` summarises it as `{edits, all,
   antennas, baselines}`, which the heatmap also embeds in `#grid-data`.
   `static/stale.mjs` turns it into the cells to mark (both triangles; an
   antenna's row and column) and the header note; `app.js` marks them on

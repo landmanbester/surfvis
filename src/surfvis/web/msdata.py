@@ -542,7 +542,7 @@ def baseline_rows(
 @timed("scope_rows")
 def scope_rows(
     ms: str, field: int, spw: int, scan: int, ds: xarray.Dataset, antennas: tuple[str, ...] | None
-) -> tuple[np.ndarray, np.ndarray, np.ndarray, int]:
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
     """Main-table rows of a scan's baselines that involve any of ``antennas`` (every row for None).
 
     An antenna's rows include its auto-correlation. Like :func:`baseline_rows`,
@@ -551,7 +551,8 @@ def scope_rows(
 
     Returns:
         Row numbers (writable), their TIME values in MJD seconds, whether
-        each is stored reversed, and how many distinct baselines they span.
+        each is stored reversed, and a code naming each row's baseline
+        (equal codes, same baseline, whichever way round it is stored).
 
     Raises:
         KeyError: if an antenna is not in the MS.
@@ -573,8 +574,8 @@ def scope_rows(
         ]
     )
     reversed_ = (a1 != a2) & ~np.isin(a1 * n + a2, presented)
-    nbaselines = np.unique(np.minimum(a1, a2) * n + np.maximum(a1, a2)).size
-    return scan_.rows[hit].copy(), scan_.times[hit], reversed_, int(nbaselines)
+    pair = np.minimum(a1, a2) * n + np.maximum(a1, a2)
+    return scan_.rows[hit].copy(), scan_.times[hit], reversed_, pair
 
 
 def view_order(ds: xarray.Dataset, name1: str, name2: str) -> tuple[str, str]:

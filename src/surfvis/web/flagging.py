@@ -26,6 +26,7 @@ Design and plan: https://github.com/ratt-ru/surfvis/issues/16
 """
 
 import atexit
+import contextlib
 import filecmp
 import functools
 import getpass
@@ -50,6 +51,11 @@ BACKUP_CHUNK_BYTES = 256 * 2**20
 # FLAG cells per read or write of a selection: a selection over every
 # baseline of a MeerKAT scan can cover billions, so they go in row chunks.
 CHUNK_CELLS = 2**24
+
+# A dry run reads FLAG to count the cells a selection would newly flag only
+# up to this many cells (a second or two); beyond it, as for a wide scope on
+# a large MS, it counts the cells selected and leaves ``newly_flagged`` None.
+DRY_RUN_CELLS = 2**26
 
 # Where a selection applies, besides its correlations (see GLOSSARY.md).
 SCOPES = ("baseline", "antenna", "all")
@@ -338,6 +344,8 @@ def _put_cells(table, edit: "Edit", on: bool) -> None:
             continue
         rows = edit.rows[i0:i1].copy()
         flag = np.array(table.getcol("FLAG", index=(rows, chans)), dtype=bool)
+        if changed.shape[-1] < flag.shape[-1]:  # an old journal's mask stops at its last correlation
+            changed = np.pad(changed, ((0, 0), (0, 0), (0, flag.shape[-1] - changed.shape[-1])))
         flag[changed] = on
         table.putcol("FLAG", flag, index=(rows, chans))
     if edit.row_set.size:
@@ -371,6 +379,8 @@ def _unpack(blob: bytes, shape: tuple[int, ...]) -> np.ndarray:
 def _load_edit(path: str, meta: dict) -> "Edit":
     """The edit a journal recorded."""
     saved = np.load(os.path.join(path, "edit.npz"))
+    if "blob" not in saved:  # a journal written before step 4 of #16: cell indices
+        return _load_old_edit(saved, meta)
     blob, offsets = saved["blob"], saved["offsets"]
     changed = [
         (int(i0), int(i1), blob[offsets[k] : offsets[k + 1]].tobytes()) for k, (i0, i1) in enumerate(saved["bounds"])
@@ -381,6 +391,29 @@ def _load_edit(path: str, meta: dict) -> "Edit":
         chan=(int(saved["chan"][0]), int(saved["chan"][1])),
         ncorr=int(saved["ncorr"]),
         changed=changed,
+        row_set=saved["row_set"],
+        cells=0,
+        newly_flagged=0,
+        description=meta["description"],
+    )
+
+
+def _load_old_edit(saved, meta: dict) -> "Edit":
+    """An edit from a journal that listed its cells as (row, channel, correlation) indices."""
+    rows = saved["rows"].astype(np.int64)
+    r, c, k = saved["changed_row"], saved["changed_chan"], saved["changed_corr"]
+    if c.size:
+        c0, c1, ncorr = int(c.min()), int(c.max()) + 1, int(k.max()) + 1
+    else:
+        c0, c1, ncorr = 0, 1, 1
+    mask = np.zeros((rows.size, c1 - c0, ncorr), dtype=bool)
+    mask[r, c - c0, k] = True
+    return Edit(
+        id=0,
+        rows=rows,
+        chan=(c0, c1),
+        ncorr=ncorr,
+        changed=[(0, rows.size, _pack(mask))] if rows.size else [],
         row_set=saved["row_set"],
         cells=0,
         newly_flagged=0,
@@ -450,17 +483,28 @@ def outstanding(ms: str, field_id: int, spw: int, scan: int, since: float) -> li
 
     These are what make a heatmap written at ``since`` stale. Read from the
     audit log, so edits by other sessions, and from before a restart, count.
+    An edit applied before ``since`` and undone after it counts too: the
+    chi-squared included its flags, which FLAG no longer holds. An edit
+    applied and undone after ``since`` cancels out.
     """
     entries = read_log(ms)
-    gone = {e.get("id") for e in entries if e.get("event") in ("undo", "rollback")}
-    return [
-        e
+    applies = {
+        e.get("id"): e
         for e in entries
-        if e.get("event") == "apply"
-        and e.get("id") not in gone
-        and (e.get("field"), e.get("spw"), e.get("scan")) == (field_id, spw, scan)
-        and float(e.get("unix", 0)) > since
-    ]
+        if e.get("event") == "apply" and (e.get("field"), e.get("spw"), e.get("scan")) == (field_id, spw, scan)
+    }
+    gone = {e.get("id"): float(e.get("unix", 0)) for e in entries if e.get("event") in ("undo", "rollback")}
+    stale = []
+    for id_, e in applies.items():
+        applied = float(e.get("unix", 0))
+        undone = gone.get(id_)
+        if undone is None:
+            if applied > since:
+                stale.append(e)
+        elif applied <= since < undone:
+            # chi2 saw the edit's flags and they are gone now: as stale as an edit.
+            stale.append(e)
+    return stale
 
 
 def recover(ms: str) -> str | None:
@@ -755,7 +799,8 @@ class Flagger:
             raise ValueError("No correlations to flag")
         if not dry_run:
             self._require_backup()
-        with self._lock:
+        # A dry run only reads, so it need not wait for (or hold up) a write.
+        with contextlib.nullcontext() if dry_run else self._lock:
             ds = msdata._open(self.ms, field_id, spw, scan)
             grid = msdata.ms_times(ds)
             nchan = ds.sizes["frequency"]
@@ -769,20 +814,22 @@ class Flagger:
             if scope == "baseline":
                 members: tuple[str, ...] = (name1, name2)
                 rows, times, flipped = msdata.baseline_rows(self.ms, field_id, spw, scan, name1, name2)
-                nbaselines = 1
+                pair = np.zeros(rows.size, dtype=np.int64)
                 if rows.size == 0:
                     raise KeyError(f"No rows for {name1}-{name2} in field {field_id}, spw {spw}, scan {scan}")
             else:
                 if scope == "antenna" and antenna not in (name1, name2):
                     raise ValueError(f"The antenna scope must name {name1} or {name2}, not {antenna!r}")
                 members = (antenna,) if scope == "antenna" else ()
-                rows, times, flipped, nbaselines = msdata.scope_rows(self.ms, field_id, spw, scan, ds, members or None)
+                rows, times, flipped, pair = msdata.scope_rows(self.ms, field_id, spw, scan, ds, members or None)
             slots = mask.any(axis=1)
             slot, hit = msdata.slot_index(grid, times)
             touched = hit & slots[slot]
             rows, slot, flipped = rows[touched], slot[touched], flipped[touched]
             if rows.size == 0:
                 raise ValueError("The selection covers no time slots with data for this baseline")
+            # The baselines with rows the selection reaches, not every one of the scope.
+            nbaselines = int(np.unique(pair[touched]).size)
 
             # Only the selection's channel range is read and written.
             chans_hit = np.flatnonzero(mask.any(axis=0))
@@ -801,7 +848,18 @@ class Flagger:
 
             import arcae
 
-            ncells = nnew = 0
+            ncells = int(mask.sum(axis=1)[slot].sum()) * len(set(corr_idx))
+            if dry_run and ncells > DRY_RUN_CELLS:
+                return {
+                    "id": None,
+                    "cells": ncells,
+                    "newly_flagged": None,
+                    "baselines": nbaselines,
+                    "scope": scope,
+                    "backup": self.backup,
+                }
+            nnew = 0
+            touched_any = False
             changed_chunks: list[tuple[int, int, bytes]] = []
             row_set: list[np.ndarray] = []
             table = arcae.table(self.ms)
@@ -815,14 +873,15 @@ class Flagger:
                     if perm is not None and fl.any():
                         cells[fl] = cells[fl][..., perm]
                     fr = flag_row[i0:i1]
-                    ncells += int(cells.sum())
                     nnew += int((cells & ~(flag | fr[:, None, None])).sum())
                     if dry_run:
                         continue
                     changed = cells & ~flag
                     changed_chunks.append((i0, i1, _pack(changed)))
                     # Rows the edit leaves fully flagged get FLAG_ROW; only ever set.
-                    full = np.flatnonzero(~fr & (flag | changed).all(axis=(1, 2)))
+                    # Only rows it changed: a row already fully flagged in FLAG
+                    # is left as found, so undo restores its FLAG_ROW exactly.
+                    full = np.flatnonzero(~fr & changed.any(axis=(1, 2)) & (flag | changed).all(axis=(1, 2)))
                     if full.size and outside.any():
                         keep = np.zeros(full.size, dtype=bool)
                         for j0, j1 in _row_chunks(full.size, (nchan, ncorr)):
@@ -830,6 +889,7 @@ class Flagger:
                             keep[j0:j1] = whole[:, outside].all(axis=(1, 2))
                         full = full[keep]
                     row_set.append(i0 + full)
+                    touched_any = touched_any or bool(changed.any())
             finally:
                 table.close()
             summary = {
@@ -841,6 +901,8 @@ class Flagger:
             }
             if dry_run:
                 return {"id": None, **summary}
+            if not touched_any:
+                raise ValueError("Nothing new to flag: every selected cell is flagged already")
 
             description = _describe(scope, members, field_id, spw, scan)
             edit = Edit(

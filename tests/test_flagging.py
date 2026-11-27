@@ -793,8 +793,8 @@ def test_backups_from_two_sessions_do_not_collide(chi2_zarr, writable_ms):
 
     names = chi2_zarr["ms"]["antenna_names"]
     backups = [
-        Flagger(writable_ms).apply(0, 0, 1, names[0], names[2], np.array(_rect(0, 0, 0, 0)), corr_idx=[0])["backup"]
-        for _ in range(2)
+        Flagger(writable_ms).apply(0, 0, 1, names[0], names[2], np.array(_rect(k, k, 0, 0)), corr_idx=[0])["backup"]
+        for k in range(2)
     ]
     assert backups[0] != backups[1]
     assert set(backups) <= set(msdata.flag_versions(writable_ms))

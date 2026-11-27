@@ -143,6 +143,7 @@ export function confirmLabel(dry) {
   const n = (v) => v.toLocaleString("en-US");
   const on = dry.correlations?.length ? ` on ${dry.correlations.join(", ")}` : "";
   const over = dry.baselines > 1 ? ` · ${n(dry.baselines)} baselines` : "";
+  if (dry.newly_flagged === null) return `Flag up to ${n(dry.cells)} cells${on}${over}`;
   if (!dry.newly_flagged) return `Nothing new to flag (${n(dry.cells)} selected, all flagged already)${over}`;
   return `Flag ${n(dry.newly_flagged)} new cells (${n(dry.cells)} selected)${on}${over}`;
 }

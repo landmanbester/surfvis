@@ -152,6 +152,11 @@ test("wider scopes: labels, which panels an edit covers, and the /flag fields", 
   assert.ok(!sameBaseline(all, { ...ctx, scan: 2 }, "m001", "m005"));
   assert.match(confirmLabel({ cells: 20, newly_flagged: 20, correlations: ["XX"], baselines: 28 }), /· 28 baselines$/);
   assert.doesNotMatch(confirmLabel({ cells: 20, newly_flagged: 20, correlations: ["XX"], baselines: 1 }), /baselines/);
+  // Too large for the server to read FLAG while counting: the cells selected, and still confirmable.
+  assert.equal(
+    confirmLabel({ cells: 2e9, newly_flagged: null, correlations: ["XX"], baselines: 2016 }),
+    "Flag up to 2,000,000,000 cells on XX · 2,016 baselines",
+  );
   assert.deepEqual(scopeParams("baseline"), { baselines: "baseline" });
   assert.deepEqual(scopeParams("antenna:4"), { baselines: "antenna", antenna: 4 });
   assert.deepEqual(scopeParams("all"), { baselines: "all" });

@@ -21,9 +21,10 @@ let carried = null; // {scan: "field/spw/scan", vertices}
 
 const scanKey = (ctx) => `${ctx.field}/${ctx.spw}/${ctx.scan}`;
 
-async function postJSON(url, body) {
+async function postJSON(url, body, signal = undefined) {
   const res = await fetch(url, {
     method: "POST",
+    signal,
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(body),
   });
@@ -59,6 +60,7 @@ export function attach(root, api) {
   let dry = null; // the server's count for it
   let uncountable = false; // no cells, or the dry run failed: nothing to confirm
   let dryFor = 0; // which dry run is the latest
+  let dryAbort = null; // cancels a superseded dry run's request
   let busy = false; // a write in flight
   let backupReady = false;
   let disabled = null; // why flagging cannot happen here, or null
@@ -98,7 +100,8 @@ export function attach(root, api) {
     applyBtn.hidden = !pending;
     if (pending) {
       applyBtn.textContent = dry ? confirmLabel(dry) : "Counting cells…";
-      applyBtn.disabled = busy || !dry || !dry.newly_flagged || !backupReady;
+      // newly_flagged is null when the server did not read FLAG to count it (a large selection).
+      applyBtn.disabled = busy || !dry || dry.newly_flagged === 0 || !backupReady;
       applyBtn.title = backupReady ? "Enter" : "Waiting for the backup flag version";
     }
     undoBtn.hidden = !latest;
@@ -115,6 +118,8 @@ export function attach(root, api) {
     uncountable = false;
     carried = { scan: scanKey(ctx), vertices: sel.vertices.map((v) => [...v]) };
     const id = ++dryFor;
+    dryAbort?.abort();
+    dryAbort = new AbortController();
     if (!spans.length) {
       uncountable = true;
       say("The selection covers no cells.");
@@ -123,7 +128,7 @@ export function attach(root, api) {
     api.redraw();
     if (uncountable) return;
     try {
-      const out = await postJSON("/flag", body({ dry_run: true }));
+      const out = await postJSON("/flag", body({ dry_run: true }), dryAbort.signal);
       if (id !== dryFor || sel.mode !== "pending") return;
       dry = out;
       say(backupReady ? "Enter to flag, Esc to cancel." : "");
@@ -142,12 +147,13 @@ export function attach(root, api) {
     uncountable = false;
     carried = null;
     dryFor++;
+    dryAbort?.abort();
     refreshButtons();
     api.redraw();
   }
 
   async function apply() {
-    if (busy || sel.mode !== "pending" || !dry?.newly_flagged || !backupReady || disabled) return;
+    if (busy || sel.mode !== "pending" || !dry || dry.newly_flagged === 0 || !backupReady || disabled) return;
     busy = true;
     refreshButtons();
     say("Flagging…");
