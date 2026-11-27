@@ -4,7 +4,7 @@ title: Chi-squared browser
 description: How surfvis serve links surfchi2 output to on-demand baseline waterfalls, the waterfall's correction / Stokes / flag-version controls, and the xarray-ms facts it depends on.
 tags: [web, fastapi, htmx, xarray-ms, zarr]
 timestamp: 2026-11-27
-last_verified_commit: b17b49a
+last_verified_commit: 2cca15c
 ---
 
 # Chi-squared browser
@@ -44,7 +44,10 @@ chi2.zarr/field{F}/spw{S}/scan{N}
   attrs               ms, rcol, wcol, fcol, mcol, gtable, corr_labels, antenna_names,
                       autocorrelations (whether the scan has any; absent before c26cd15),
                       created (unix time chi2 started, before it read FLAG; absent before
-                      step 4 of #16, when the zarr directory's mtime stands in)
+                      step 4 of #16, when the zarr directory's mtime stands in),
+                      recomputed_cells, recomputed_at (once serve has recomputed any)
+  computed            (antenna1, antenna2) unix time each cell was computed; added by
+                      serve's first recompute, absent until then (created stands in)
 ```
 
 The browser looks at one field, spw and scan at a time. `--ntimes` and
@@ -416,21 +419,47 @@ and the selection tool in `static/wf/` (see "Selection on the canvas"). Terms
   line appends `rollback` (or completes the undo and appends `undo`), so the
   log never claims an edit the MS does not hold. A failed log write fails the
   edit and puts it back.
-- **Stale heatmaps.** `flagging.outstanding(ms, field, spw, scan, since)` is
-  the scan's applies after `since` not since undone or rolled back, plus
-  those applied before `since` and undone after it (`chi2` saw flags FLAG
-  no longer holds); `since` is the zarr's `created`. For an older zarr the
-  directory's mtime stands in, which is when `chi2` finished, so an edit
-  made while it ran is missed; both rely on `chi2` and `serve` sharing a
-  clock. `GET /stale` summarises it as `{edits, all,
-  antennas, baselines}`, which the heatmap also embeds in `#grid-data`.
-  `static/stale.mjs` turns it into the cells to mark (both triangles; an
-  antenna's row and column) and the header note; `app.js` marks them on
-  every heatmap render and fetches `/stale` again on `surfvis:flagged`,
-  which `flagtool.mjs` dispatches after an apply or undo. Reading the log
-  rather than the process's stack means edits by other sessions and from
-  before a restart count, and a `chi2` re-run clears them. A read-only
-  `serve` shows them too.
+- **Stale cells.** Staleness is per cell. `Chi2Store.cell_times` is when each
+  cell's χ² was computed: the group's `computed` array, else its `created`,
+  else (an older zarr) the directory's mtime, which is when `chi2` finished,
+  so an edit made while it ran is missed. `flagging.stale_cells` walks the
+  audit log: a cell is stale if an edit touching it was applied after the
+  cell's time and is still applied, or applied before and undone (or rolled
+  back) after it; an apply and its undo both after cancel. The diagonal is
+  never stale (autos have no χ²). All of this relies on `chi2` and `serve`
+  sharing a clock. `GET /stale` returns `{edits, cells (upper triangle),
+  recomputed, can_recompute, why_not}`, also embedded in `#grid-data`;
+  `static/stale.mjs` turns it into markers (both triangles), the note, the
+  button label and the provenance line; `app.js` applies them on every
+  heatmap render and fetches `/stale` again on `surfvis:flagged`, which
+  `flagtool.mjs` dispatches after an apply or undo. Reading the log rather
+  than the process's stack means edits by other sessions and from before a
+  restart count. A read-only `serve` shows them too.
+- **Recompute** (step 5): `POST /recompute {field, spw, scan}` forms the
+  scan's stale cells again and writes them into the zarr, in a background
+  thread, one job per server (`GET /recompute/state`: state, cells,
+  rows_done/rows_total, error). Needs `--allow-flagging` (403): it writes.
+  409 when nothing is stale, a job is running, or the group cannot be
+  recomputed (`Chi2Store.recomputable`: per-chunk stores, or attrs missing
+  `rcol`/`wcol`/`fcol`/`corr_labels`). `web/recompute.py::cells` follows
+  `chi2`'s recipe, not the waterfall's: the zarr's columns, model, gains and
+  products, read by row with arcae in chunks, formed by
+  `utils/products.form`, `|r|^2 w` over samples unflagged in **FLAG only**
+  (FLAG_ROW ignored, as `chi2` does), rows as stored (a baseline stored both
+  ways contributes both orientations, as in `chi2`), and `1/σ²` computed in
+  the column's float32 for `SIGMA_SPECTRUM` (float64 differed from `chi2` by
+  1e-8). Tests pin agreement with `chi2` to 1e-9 for plain residuals, gains
+  with Stokes I and V, random weights, `SIGMA_SPECTRUM` and reversed rows.
+  Every product is recomputed for the stale cells; the cost is the reads.
+  `Chi2Store.write_cells` sets both triangles of `chi2` and `counts`, stamps
+  the cells' `computed` with the time the job **started** (before it read
+  FLAG, so an edit made meanwhile stays stale), bumps `recomputed_cells`,
+  and re-consolidates. Adding `computed` goes through xarray (for its
+  dimension names), whose append mode replaced the group's attrs: they are
+  saved through zarr and put back. `computed` is written last, so a kill
+  mid-write leaves the cells stale, to be recomputed again. The browser
+  polls the job, then redraws the heatmap without re-requesting the
+  waterfall. `--imagesout` PNGs are not touched.
 - **Never open a possibly broken MS in the server process.** `_opens()`
   probes in a child process: a failed arcae open of the broken MS left a read
   lock in casacore's in-process lock registry (`FileLocker::acquire` waits on

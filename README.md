@@ -414,7 +414,12 @@ Every edit, undo and rollback is appended to an audit log,
 where, the scope, the polygon (in slots and channels, and as UTC times and
 frequencies) and how many cells changed. The heatmap reads it: in a scan
 with edits newer than its `chi2` run, the header says so and the cells
-those edits touched get a corner mark, until `chi2` is run again.
+those edits touched get a corner mark. With `--allow-flagging` the note
+offers **Recompute N stale cells**: `serve` forms those cells' χ² again from
+the MS, exactly as `chi2` did (same columns, model, gains, products and
+weights), and writes them into the `chi2` output in the background. The
+header then says how many cells `serve` has recomputed. The per-chunk PNGs
+in `--imagesout` are left as `chi2` wrote them.
 
 A crash, `kill -9` or power cut in the middle of a write cannot leave the MS
 unopenable or an edit half-applied. Every write is journalled in

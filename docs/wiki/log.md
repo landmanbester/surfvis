@@ -3,10 +3,18 @@ type: log
 title: Wiki changelog
 description: Chronological record of what changed in the wiki and why.
 timestamp: 2026-11-27
-last_verified_commit: b17b49a
+last_verified_commit: 2cca15c
 ---
 
 # Wiki changelog
+
+## 2026-11-27 — recomputing stale cells (verified at `2cca15c`)
+
+- **web-app.md:** step 5 of #16: staleness per cell against the zarr's new
+  `computed` array; `POST /recompute` and `web/recompute.py`, which follows
+  chi2's recipe (FLAG only, rows as stored, float32 `1/σ²`); how
+  `write_cells` keeps chi2's attrs and stamps cells with the job's start.
+  `GLOSSARY.md` redefines stale per cell and adds recompute.
 
 ## 2026-11-27 — wider scopes, audit log, stale heatmaps (verified at `b17b49a`)
 
