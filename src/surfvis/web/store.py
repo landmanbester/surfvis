@@ -1,5 +1,6 @@
 """Read the chi-squared zarr written by ``surfvis chi2 --dataout``."""
 
+import os
 from dataclasses import dataclass
 from functools import lru_cache
 from pathlib import Path
@@ -76,6 +77,83 @@ class Chi2Store:
     def attrs(self, field: int, spw: int, scan: int) -> dict:
         """The attributes ``chi2`` recorded on a (field, spw, scan) group."""
         return dict(self.group(field, spw, scan).attrs)
+
+    def cell_times(self, field: int, spw: int, scan: int) -> np.ndarray:
+        """When each cell's chi-squared was computed, unix seconds, ``(antenna1, antenna2)``.
+
+        ``computed`` once ``serve`` has recomputed any cell; before that the
+        group's ``created`` (when chi2 started), or for an older zarr the
+        directory's mtime (when chi2 finished, so edits made while it ran
+        are missed).
+        """
+        ds = self.group(field, spw, scan)
+        if "computed" in ds:
+            return np.asarray(ds["computed"].values, dtype=float)
+        since = ds.attrs.get("created")
+        if since is None:
+            since = os.path.getmtime(self.path)
+        nant = len(ds.attrs["antenna_names"])
+        return np.full((nant, nant), float(since))
+
+    def recomputable(self, field: int, spw: int, scan: int) -> str | None:
+        """Why this group's cells cannot be recomputed, or None if they can."""
+        ds = self.group(field, spw, scan)
+        if "time_bin" in ds.dims or "product" not in ds.coords:
+            return "This chi2 output predates per-scan totals; rerun surfvis chi2 to recompute cells."
+        missing = [k for k in ("rcol", "wcol", "fcol", "corr_labels") if k not in ds.attrs]
+        if missing:
+            return f"This chi2 output does not record {', '.join(missing)}; rerun surfvis chi2 to recompute cells."
+        return None
+
+    def write_cells(
+        self,
+        field: int,
+        spw: int,
+        scan: int,
+        pairs: list[tuple[int, int]],
+        chi2: np.ndarray,
+        counts: np.ndarray,
+        started: float,
+    ) -> None:
+        """Replace the given cells' chi-squared and counts (both triangles), stamped ``started``.
+
+        Args:
+            pairs: Antenna index pairs ``(p, q)``.
+            chi2: ``(nproducts, len(pairs))``, in the group's product order.
+            counts: Same shape.
+            started: When the recompute began, before it read FLAG: the cells'
+                new ``computed`` time.
+        """
+        import xarray as xr_
+
+        key = f"field{field}/spw{spw}/scan{scan}"
+        times = self.cell_times(field, spw, scan)
+        ds = self.group(field, spw, scan)
+        # xarray's append mode replaces the group's attrs with the dataset's:
+        # keep chi2's own, through zarr, and put them back.
+        saved = dict(zarr.open_group(str(self.path), mode="r")[key].attrs)
+        if "computed" not in ds:
+            # Through xarray, so the new variable carries its dimension names.
+            coords = {"antenna1": ds["antenna1"].values, "antenna2": ds["antenna2"].values}
+            xr_.Dataset({"computed": (("antenna1", "antenna2"), times)}, coords=coords).to_zarr(
+                str(self.path), group=key, mode="a", consolidated=False
+            )
+            zarr.consolidate_metadata(str(self.path))  # zarr opens groups through it
+        group = zarr.open_group(str(self.path), mode="r+")[key]
+        group.attrs.update({k: v for k, v in saved.items() if k not in group.attrs})
+        c2, cn = np.array(group["chi2"][:]), np.array(group["counts"][:])
+        for k, (p, q) in enumerate(pairs):
+            for a, b in ((p, q), (q, p)):
+                c2[:, a, b] = chi2[:, k]
+                cn[:, a, b] = counts[:, k]
+                times[a, b] = started
+        group["chi2"][:] = c2
+        group["counts"][:] = cn
+        group["computed"][:] = times
+        group.attrs["recomputed_cells"] = int(group.attrs.get("recomputed_cells", 0)) + len(pairs)
+        group.attrs["recomputed_at"] = float(started)
+        zarr.consolidate_metadata(str(self.path))
+        _open_group.cache_clear()
 
     def products(self, field: int, spw: int, scan: int) -> list[str]:
         """The products (``XX``, ``I``, ...) a scan has."""

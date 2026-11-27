@@ -478,33 +478,61 @@ def _read_log(path: str, mtime_ns: int, size: int) -> list[dict]:
     return entries
 
 
-def outstanding(ms: str, field_id: int, spw: int, scan: int, since: float) -> list[dict]:
-    """The edits of one scan applied after ``since`` (unix seconds) and neither undone nor rolled back.
+def _edit_cells(entry: dict, names: list[str]) -> np.ndarray:
+    """The heatmap cells an applied edit touched, ``(nant, nant)``, both triangles."""
+    n = len(names)
+    index = {name: k for k, name in enumerate(names)}
+    cells = np.zeros((n, n), dtype=bool)
+    scope = entry.get("scope", "baseline")
+    antennas = [index[a] for a in entry.get("antennas", []) if a in index]
+    if scope == "all":
+        cells[:] = True
+    elif scope == "antenna":
+        for p in antennas:
+            cells[p, :] = cells[:, p] = True
+    elif len(antennas) == 2:
+        p, q = antennas
+        cells[p, q] = cells[q, p] = True
+    return cells
 
-    These are what make a heatmap written at ``since`` stale. Read from the
-    audit log, so edits by other sessions, and from before a restart, count.
-    An edit applied before ``since`` and undone after it counts too: the
-    chi-squared included its flags, which FLAG no longer holds. An edit
-    applied and undone after ``since`` cancels out.
+
+def stale_cells(
+    ms: str, field_id: int, spw: int, scan: int, computed: np.ndarray, names: list[str]
+) -> tuple[int, np.ndarray]:
+    """Which cells of a scan's heatmap no longer describe FLAG, and how many edits make them so.
+
+    A cell is stale when an edit touching it was applied after the cell's
+    chi-squared was computed and is still applied, or was applied before
+    and undone (or rolled back) after: the chi-squared counted flags FLAG
+    no longer holds. An edit applied and undone since cancels out.
+
+    Args:
+        computed: When each cell was computed, unix seconds, ``(nant, nant)``.
+        names: The heatmap's antenna names, in grid order.
+
+    Returns:
+        The number of edits making any cell stale, and the ``(nant, nant)``
+        stale mask, never true on the diagonal.
     """
     entries = read_log(ms)
-    applies = {
-        e.get("id"): e
-        for e in entries
-        if e.get("event") == "apply" and (e.get("field"), e.get("spw"), e.get("scan")) == (field_id, spw, scan)
-    }
     gone = {e.get("id"): float(e.get("unix", 0)) for e in entries if e.get("event") in ("undo", "rollback")}
-    stale = []
-    for id_, e in applies.items():
+    stale = np.zeros(computed.shape, dtype=bool)
+    edits = 0
+    for e in entries:
+        if e.get("event") != "apply" or (e.get("field"), e.get("spw"), e.get("scan")) != (field_id, spw, scan):
+            continue
         applied = float(e.get("unix", 0))
-        undone = gone.get(id_)
+        undone = gone.get(e.get("id"))
+        touched = _edit_cells(e, names)
+        np.fill_diagonal(touched, False)  # auto-correlations have no chi-squared to go stale
         if undone is None:
-            if applied > since:
-                stale.append(e)
-        elif applied <= since < undone:
-            # chi2 saw the edit's flags and they are gone now: as stale as an edit.
-            stale.append(e)
-    return stale
+            hit = touched & (computed < applied)
+        else:
+            hit = touched & (computed >= applied) & (computed < undone)
+        if hit.any():
+            edits += 1
+            stale |= hit
+    return edits, stale
 
 
 def recover(ms: str) -> str | None:

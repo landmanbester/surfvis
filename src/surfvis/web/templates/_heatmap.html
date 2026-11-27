@@ -12,7 +12,13 @@
       median {{ "%.2f"|format(median) }} &middot;
       worst {{ "%.2f"|format(worst) }}
     </p>
-    <p class="note stale-note" id="stale-note"{% if not stale.edits %} hidden{% endif %}>{% if stale.edits %}&chi;<sup>2</sup> predates {{ stale.edits }} manual edit{{ "s" if stale.edits != 1 }} in this scan; marked cells are stale (re-run chi2){% endif %}</p>
+    <p class="note stale-note" id="stale-note"{% if not stale.edits %} hidden{% endif %}>
+      <span class="stale-text">{% if stale.edits %}&chi;<sup>2</sup> predates {{ stale.edits }} manual edit{{ "s" if stale.edits != 1 }} in this scan; marked cells are stale{% if not stale.can_recompute %} (re-run chi2){% endif %}{% endif %}</span>
+      <button type="button" class="wf-button" id="recompute"{% if not (stale.edits and stale.can_recompute) %} hidden{% endif %}
+              title="Form these cells' chi-squared again from the MS, as chi2 did, and write them into its output">Recompute {{ stale.cells|length }} stale cell{{ "s" if stale.cells|length != 1 }}</button>
+      <span class="recompute-status" aria-live="polite"></span>
+    </p>
+    <p class="meta recomputed" id="recomputed"{% if not stale.recomputed %} hidden{% endif %}>{{ stale.recomputed }} cell{{ "s" if stale.recomputed != 1 }} recomputed by serve since chi2</p>
   </div>
 
   <div class="heatmap-row">

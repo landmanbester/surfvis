@@ -1,39 +1,44 @@
-// Which heatmap cells manual edits have made stale, from the server's /stale
-// summary of the audit log. Tested in tests/js/stale.test.mjs.
+// What the heatmap shows about stale cells, from the server's /stale
+// summary (also embedded in #grid-data). Tested in tests/js/stale.test.mjs.
 //
-// stale: {edits, all, antennas: [name], baselines: [[name, name]]}
-// names: the heatmap's antenna names, in grid order.
+// stale: {edits, cells: [[p, q]] (upper triangle), recomputed, can_recompute, why_not}
 
 // The cells to mark, as "p,q" keys of the grid (both triangles: it is symmetric).
-export function staleCells(stale, names) {
+export function staleCells(stale) {
   const cells = new Set();
   if (!stale || !stale.edits) return cells;
-  const n = names.length;
-  const index = new Map(names.map((name, k) => [name, k]));
-  const both = (p, q) => {
+  for (const [p, q] of stale.cells || []) {
     cells.add(`${p},${q}`);
     cells.add(`${q},${p}`);
-  };
-  if (stale.all) {
-    for (let p = 0; p < n; p++) for (let q = 0; q < n; q++) cells.add(`${p},${q}`);
-    return cells;
-  }
-  for (const name of stale.antennas || []) {
-    const p = index.get(name);
-    if (p === undefined) continue;
-    for (let q = 0; q < n; q++) both(p, q);
-  }
-  for (const [a, b] of stale.baselines || []) {
-    const p = index.get(a);
-    const q = index.get(b);
-    if (p !== undefined && q !== undefined) both(p, q);
   }
   return cells;
 }
 
-// The heatmap header's note, or "" when nothing is stale.
+const plural = (n, word) => `${n.toLocaleString("en-US")} ${word}${n === 1 ? "" : "s"}`;
+
+// The header's note, or "" when nothing is stale.
 export function staleNote(stale) {
   if (!stale || !stale.edits) return "";
-  const s = stale.edits === 1 ? "" : "s";
-  return `χ² predates ${stale.edits} manual edit${s} in this scan; marked cells are stale (re-run chi2)`;
+  const why = stale.can_recompute ? "" : " (re-run chi2)";
+  return `χ² predates ${plural(stale.edits, "manual edit")} in this scan; marked cells are stale${why}`;
+}
+
+// The recompute button's label, or "" when there is nothing it can do.
+export function recomputeLabel(stale) {
+  if (!stale || !stale.edits || !stale.can_recompute || !stale.cells?.length) return "";
+  return `Recompute ${plural(stale.cells.length, "stale cell")}`;
+}
+
+// The provenance line, or "".
+export function recomputedNote(stale) {
+  return stale?.recomputed ? `${plural(stale.recomputed, "cell")} recomputed by serve since chi2` : "";
+}
+
+// Progress of a /recompute/state job, in words.
+export function jobText(job) {
+  if (!job || job.state === "idle") return "";
+  if (job.state === "failed") return `Recompute failed: ${job.error}`;
+  if (job.state === "done") return "Recomputed.";
+  if (!job.rows_total) return `Recomputing ${plural(job.cells, "cell")}…`;
+  return `Recomputing ${plural(job.cells, "cell")}… ${Math.floor((100 * job.rows_done) / job.rows_total)}%`;
 }

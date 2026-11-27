@@ -3,6 +3,8 @@
 import hashlib
 import os
 import sys
+import threading
+import time
 from pathlib import Path
 from typing import Literal
 from urllib.parse import urlencode
@@ -15,7 +17,7 @@ from fastapi.templating import Jinja2Templates
 from pydantic import BaseModel, Field
 
 from surfvis.utils import gains as gains_mod
-from surfvis.web import flagging, msdata, planes, profiling, render
+from surfvis.web import flagging, msdata, planes, profiling, recompute, render
 from surfvis.web.flagging import BackupPendingError, Flagger, StaleUndoError
 from surfvis.web.store import Chi2Store, Selection
 
@@ -54,6 +56,14 @@ class FlagRequest(BaseModel):
     gtable: str | None = None
     flagversion: str = ""
     dry_run: bool = False
+
+
+class RecomputeRequest(BaseModel):
+    """The scan whose stale cells to recompute."""
+
+    field: int
+    spw: int
+    scan: int
 
 
 class UndoRequest(BaseModel):
@@ -230,6 +240,7 @@ def create_app(
             "positions": msdata.antenna_positions(ms_path, matrix.antenna_names),
             "stale": _stale(field, spw, scan),
             "where": {"field": field, "spw": spw, "scan": scan},
+            "query": urlencode({"field": field, "spw": spw, "scan": scan, "c": c, "scale": scale}),
         }
         return templates.TemplateResponse(
             request,
@@ -273,22 +284,24 @@ def create_app(
             png = render.histogram_png(matrix.chi2_dof, norm)
         return Response(png, media_type="image/png")
 
-    def _stale(field: int, spw: int, scan: int) -> dict:
-        """Edits to a scan still applied and newer than its χ² (see :func:`flagging.outstanding`).
+    def _stale_mask(field: int, spw: int, scan: int) -> tuple[int, np.ndarray]:
+        """Edits making cells of a scan stale, and the cells (``flagging.stale_cells``)."""
+        names = list(store.group(field, spw, scan).attrs["antenna_names"])
+        edits, mask = flagging.stale_cells(ms_path, field, spw, scan, store.cell_times(field, spw, scan), names)
+        return edits, mask
 
-        ``all`` when one covered every baseline; otherwise the ``antennas``
-        whose every baseline was edited and the single ``baselines``.
-        """
-        group = store.group(field, spw, scan)
-        since = group.attrs.get("created")
-        if since is None:  # written before chi2 recorded it
-            since = os.path.getmtime(store.path)
-        edits = flagging.outstanding(ms_path, field, spw, scan, float(since))
+    def _stale(field: int, spw: int, scan: int) -> dict:
+        """What the heatmap shows about stale cells and recomputing them."""
+        edits, mask = _stale_mask(field, spw, scan)
+        attrs = store.attrs(field, spw, scan)
+        reason = store.recomputable(field, spw, scan) if flagger is not None else "Recomputing needs --allow-flagging"
+        cells = [[int(p), int(q)] for p, q in zip(*np.nonzero(np.triu(mask)), strict=True)]
         return {
-            "edits": len(edits),
-            "all": any(e.get("scope") == "all" for e in edits),
-            "antennas": sorted({a for e in edits if e.get("scope") == "antenna" for a in e.get("antennas", [])}),
-            "baselines": [e.get("antennas", []) for e in edits if e.get("scope") == "baseline"],
+            "edits": edits,
+            "cells": cells,
+            "recomputed": int(attrs.get("recomputed_cells", 0)),
+            "can_recompute": reason is None,
+            "why_not": reason,
         }
 
     def _has_auto(field: int, spw: int, scan: int, name: str) -> bool:
@@ -637,6 +650,62 @@ def create_app(
             return _stale(field, spw, scan)
         except (KeyError, IndexError, FileNotFoundError) as exc:
             raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+    # One recompute at a time per server, in a background thread: an "all
+    # baselines" edit means re-reading the whole scan, minutes on a large MS.
+    job: dict = {"state": "idle"}
+    job_lock = threading.Lock()
+
+    def _run_recompute(field: int, spw: int, scan: int, pairs: list[tuple[int, int]]) -> None:
+        started = time.time()  # before FLAG is read: edits made meanwhile stay stale
+
+        def progress(done: int, total: int) -> None:
+            job.update(rows_done=done, rows_total=total)
+
+        try:
+            attrs = store.attrs(field, spw, scan)
+            products = store.products(field, spw, scan)
+            chi2, counts = recompute.cells(ms_path, attrs, products, field, spw, scan, pairs, progress)
+            store.write_cells(field, spw, scan, pairs, chi2, counts, started)
+            job.update(state="done", finished=time.time())
+        except Exception as exc:  # noqa: BLE001 - reported through /recompute/state
+            job.update(state="failed", error=f"{type(exc).__name__}: {exc}", finished=time.time())
+
+    @app.post("/recompute")
+    def recompute_start(req: RecomputeRequest):
+        """Recompute a scan's stale cells by chi2's recipe and write them into the zarr, in the background."""
+        _flagger()  # writing the zarr is writing too: --allow-flagging
+        try:
+            reason = store.recomputable(req.field, req.spw, req.scan)
+            if reason is not None:
+                raise HTTPException(status_code=409, detail=reason)
+            _, mask = _stale_mask(req.field, req.spw, req.scan)
+        except (KeyError, IndexError, FileNotFoundError) as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        pairs = [(int(p), int(q)) for p, q in zip(*np.nonzero(np.triu(mask)), strict=True)]
+        if not pairs:
+            raise HTTPException(status_code=409, detail="Nothing in this scan is stale")
+        with job_lock:
+            if job.get("state") == "running":
+                raise HTTPException(status_code=409, detail="A recompute is already running")
+            job.clear()
+            job.update(
+                state="running",
+                field=req.field,
+                spw=req.spw,
+                scan=req.scan,
+                cells=len(pairs),
+                rows_done=0,
+                rows_total=0,
+            )
+        threading.Thread(
+            target=_run_recompute, args=(req.field, req.spw, req.scan, pairs), name="surfvis-recompute", daemon=True
+        ).start()
+        return dict(job)
+
+    @app.get("/recompute/state")
+    def recompute_state():
+        return dict(job)
 
     @app.get("/flag/state")
     def flag_state():

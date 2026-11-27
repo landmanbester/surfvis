@@ -30,5 +30,9 @@ The durable record next to the MS of every edit applied and undone: when, by who
 _Avoid_: history, journal (the journal is what makes one write crash-safe)
 
 **Stale**:
-A scan whose χ² predates edits that are still applied: the heatmap no longer describes the MS's FLAG.
+A heatmap cell whose χ² was computed before an edit that touches it, or before the undo of an edit it included: it no longer describes the MS's FLAG.
 _Avoid_: outdated, dirty
+
+**Recompute**:
+Forming stale cells' χ² again from the Measurement Set, by the same recipe chi2 used, and writing them into the chi2 output in place of the stale values.
+_Avoid_: refresh, patch, rerun (rerunning chi2 is something else)

@@ -1,5 +1,5 @@
 import { Carry } from "./carry.mjs";
-import { staleCells, staleNote } from "./stale.mjs";
+import { jobText, recomputedNote, recomputeLabel, staleCells, staleNote } from "./stale.mjs";
 
 // Behaviour htmx does not cover: loading feedback, the selected baseline,
 // the hover readout, keyboard navigation, and carrying waterfall settings
@@ -70,6 +70,11 @@ document.body.addEventListener("click", (e) => {
 document.body.addEventListener("htmx:afterSettle", (e) => {
   if (e.detail.target.id !== "heatmap") return;
   markSelected();
+  // A redraw after a recompute: the same scan, so the waterfall stays as it is.
+  if (refreshing) {
+    refreshing = false;
+    return;
+  }
   // A new field, scan, bin or product: follow the selected baseline into it,
   // rather than leave a waterfall from somewhere else on screen.
   if (!selected || !document.querySelector("#waterfall .panel")) return;
@@ -87,38 +92,106 @@ document.body.addEventListener("htmx:afterSettle", (e) => {
 });
 
 // Cells whose chi-squared predates manual edits get a marker, and the header
-// says how many (stale.mjs). Rendered with the heatmap, and fetched again
-// whenever the waterfall applies or undoes an edit.
+// says how many and offers to recompute them (stale.mjs). Rendered with the
+// heatmap, and fetched again whenever the waterfall applies or undoes an edit.
 function markStale(stale) {
   const data = gridData();
   if (!data) return;
-  const cells = staleCells(stale, data.names);
+  const cells = staleCells(stale);
   const n = data.names.length;
   document.querySelectorAll(".grid i").forEach((cell, k) => {
     cell.classList.toggle("stale", cells.has(`${Math.floor(k / n)},${k % n}`));
   });
   const note = document.getElementById("stale-note");
   if (note) {
-    note.textContent = staleNote(stale);
-    note.hidden = !note.textContent;
+    note.querySelector(".stale-text").textContent = staleNote(stale);
+    note.hidden = !staleNote(stale);
+    const button = document.getElementById("recompute");
+    button.textContent = recomputeLabel(stale);
+    button.hidden = !button.textContent;
+  }
+  const done = document.getElementById("recomputed");
+  if (done) {
+    done.textContent = recomputedNote(stale);
+    done.hidden = !done.textContent;
   }
 }
 
-document.body.addEventListener("htmx:afterSettle", (e) => {
-  if (e.detail.target.id === "heatmap") markStale(gridData()?.stale);
-});
+const sameScan = (a, b) => a && b && a.field === b.field && a.spw === b.spw && a.scan === b.scan;
 
-document.addEventListener("surfvis:flagged", async () => {
+async function refreshStale() {
   const where = gridData()?.where;
   if (!where) return;
   try {
     const res = await fetch(`/stale?${new URLSearchParams(where)}`);
     if (!res.ok) return;
     const stale = await res.json();
-    const now = gridData()?.where;
     // Only if the heatmap on screen is still the one asked about.
-    if (now && now.field === where.field && now.spw === where.spw && now.scan === where.scan) markStale(stale);
+    if (sameScan(gridData()?.where, where)) markStale(stale);
   } catch (_) {}
+}
+
+document.body.addEventListener("htmx:afterSettle", (e) => {
+  if (e.detail.target.id === "heatmap") markStale(gridData()?.stale);
+});
+document.addEventListener("surfvis:flagged", refreshStale);
+
+// Recompute: start the server's background job, show its progress, and
+// redraw the heatmap when it is done (without re-requesting the waterfall).
+let refreshing = false;
+function recomputeStatus(text, error = false) {
+  const status = document.querySelector("#stale-note .recompute-status");
+  if (!status) return;
+  status.textContent = text;
+  status.classList.toggle("error", error);
+}
+
+async function pollRecompute(where) {
+  for (;;) {
+    await new Promise((r) => setTimeout(r, 1000));
+    let job;
+    try {
+      job = await (await fetch("/recompute/state")).json();
+    } catch (err) {
+      return recomputeStatus(`Lost track of the recompute: ${err.message}`, true);
+    }
+    if (!sameScan(gridData()?.where, where)) return; // the user moved on; the job carries on
+    recomputeStatus(jobText(job), job.state === "failed");
+    if (job.state === "failed") return;
+    if (job.state === "done") {
+      const query = gridData()?.query;
+      if (!query) return;
+      refreshing = true;
+      htmx.ajax("GET", `/heatmap?${query}`, { target: "#heatmap" });
+      return;
+    }
+  }
+}
+
+document.body.addEventListener("click", async (e) => {
+  const button = e.target.closest("#recompute");
+  if (!button) return;
+  const where = gridData()?.where;
+  if (!where) return;
+  button.disabled = true;
+  try {
+    const res = await fetch("/recompute", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(where),
+    });
+    const job = await res.json();
+    if (!res.ok) {
+      recomputeStatus(job.detail || `HTTP ${res.status}`, true);
+      button.disabled = false;
+      return;
+    }
+    recomputeStatus(jobText(job));
+    pollRecompute(where);
+  } catch (err) {
+    recomputeStatus(err.message, true);
+    button.disabled = false;
+  }
 });
 
 // The waterfall panel is drawn by static/wf/widget.mjs; mount it whenever the panel is (re)rendered.

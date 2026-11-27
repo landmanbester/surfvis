@@ -279,19 +279,26 @@ def test_the_audit_log_records_applies_undos_and_rollbacks(ms):
     assert apply["slots"] == [1, 2] and apply["channels"] == [3, 4] and apply["cells"] == first["cells"]
     assert apply["times_utc"][0].endswith("Z") and len(apply["freqs_hz"]) == 2 and "@" in apply["user"]
     assert entries[1]["antennas"] == ["m002"] and entries[2]["id"] == second["id"]
-    assert [e["id"] for e in flagging.outstanding(ms, 0, 0, 1, since=0)] == [first["id"]]
-    assert flagging.outstanding(ms, 0, 0, 2, since=0) == []
-    assert flagging.outstanding(ms, 0, 0, 1, since=entries[-1]["unix"]) == []
+    names = [f"m{k:03d}" for k in range(8)]
+
+    def stale(since, scan=1):
+        edits, mask = flagging.stale_cells(ms, 0, 0, scan, np.full((8, 8), since), names)
+        return edits, {tuple(pq) for pq in np.argwhere(np.triu(mask)).tolist()}
+
+    assert stale(0) == (1, {(1, 2)})
+    assert stale(0, scan=2) == (0, set())
+    assert stale(entries[-1]["unix"]) == (0, set())
     # chi2 between an apply and its undo saw flags FLAG no longer holds: stale too.
     between = (entries[1]["unix"] + entries[2]["unix"]) / 2
-    assert [e["id"] for e in flagging.outstanding(ms, 0, 0, 1, since=between)] == [second["id"]]
+    edits, cells = stale(between)
+    assert edits == 1 and cells == {(min(k, 2), max(k, 2)) for k in range(8) if k != 2}
 
     # An edit interrupted after it was logged is rolled back at recovery, and the log says so.
     edit = flagger.edits[-1]
     flagging._write_journal(ms, edit, [], "apply")
     assert "rolled back" in flagging.recover(ms)
     assert json.loads(open(flagging.audit_path(ms)).readlines()[-1])["event"] == "rollback"
-    assert flagging.outstanding(ms, 0, 0, 1, since=0) == []
+    assert stale(0) == (0, set())
 
 
 @needs_web
@@ -305,14 +312,19 @@ def test_the_heatmap_marks_what_edits_made_stale(scoped, ms):
     client = TestClient(create_app(scoped["zarr"], ms=ms, allow_flagging=True, warm=False))
     _wait_for_backup(client)
     query = "field=0&spw=0&scan=1"
-    assert client.get(f"/stale?{query}").json() == {"edits": 0, "all": False, "antennas": [], "baselines": []}
+
+    def cells():
+        return {tuple(c) for c in client.get(f"/stale?{query}").json()["cells"]}
+
+    assert client.get(f"/stale?{query}").json()["edits"] == 0 and cells() == set()
     assert 'id="stale-note" hidden' in client.get(f"/heatmap?{query}&c=XX").text
 
     body = {"field": 0, "spw": 0, "scan": 1, "p": 1, "q": 3, "product": "XX", "vertices": _rect(1, 2, 4, 9)}
     one = client.post("/flag", json=body).json()
     client.post("/flag", json={**body, "baselines": "antenna", "antenna": 3})
     stale = client.get(f"/stale?{query}").json()
-    assert stale == {"edits": 2, "all": False, "antennas": ["m003"], "baselines": [["m001", "m003"]]}
+    # m003's crosses; the diagonal (its auto) has no chi-squared to go stale.
+    assert stale["edits"] == 2 and cells() == {(min(k, 3), max(k, 3)) for k in range(8) if k != 3}
     html = client.get(f"/heatmap?{query}&c=XX").text
     assert "predates 2 manual edits" in html
     blob = html.split('id="grid-data">')[1].split("</script>")[0]
@@ -321,10 +333,9 @@ def test_the_heatmap_marks_what_edits_made_stale(scoped, ms):
 
     # Undo takes the newest edit out; the antenna that remains is only the baseline's.
     client.post("/flag/undo", json={"id": client.get("/flag/state").json()["edits"][-1]["id"]})
-    assert client.get(f"/stale?{query}").json()["baselines"] == [["m001", "m003"]]
-    assert client.get(f"/stale?{query}").json()["antennas"] == []
-    client.post("/flag", json={**body, "baselines": "all"})
-    assert client.get(f"/stale?{query}").json()["all"] is True
+    assert cells() == {(1, 3)}
+    client.post("/flag", json={**body, "vertices": _rect(5, 6, 4, 9), "baselines": "all"})
+    assert len(cells()) == 8 * 7 // 2
     assert one["scope"] == "baseline"
 
 
