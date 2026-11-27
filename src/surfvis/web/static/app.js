@@ -36,12 +36,21 @@ document.body.addEventListener("htmx:afterRequest", (e) => e.detail.target.class
 
 // A cell click carries the waterfall controls the user moved off the
 // heatmap's defaults (the server marks them .keep), so a choice survives a
-// change of baseline.
+// change of baseline. An auto-correlation's panel has its own default model
+// (none), so it adds to what it was handed rather than replacing it: a model
+// chosen on a cross-correlation survives passing through the diagonal.
+let carried = {};
+document.body.addEventListener("htmx:afterSettle", (e) => {
+  if (e.detail.target.id !== "waterfall") return;
+  const panel = e.detail.target.querySelector(".panel");
+  if (!panel) return;
+  const keep = Object.fromEntries([...panel.querySelectorAll(".keep")].map((el) => [el.name, el.value]));
+  carried = panel.dataset.auto ? { ...carried, ...keep } : keep;
+});
+
 document.body.addEventListener("htmx:configRequest", (e) => {
   if (!e.detail.elt.matches(".grid i[data-pq]")) return;
-  document.querySelectorAll("#waterfall .keep").forEach((el) => {
-    e.detail.parameters[el.name] = el.value;
-  });
+  Object.assign(e.detail.parameters, carried);
 });
 
 document.body.addEventListener("click", (e) => {
@@ -63,8 +72,11 @@ document.body.addEventListener("htmx:afterSettle", (e) => {
   if (cell) {
     cell.click();
   } else {
-    document.getElementById("waterfall").innerHTML =
-      `<p class="hint">${selected[0]} &times; ${selected[1]} has no data here. Click a cell to plot another baseline.</p>`;
+    const hint = document.createElement("p");
+    hint.className = "hint";
+    const what = selected[0] === selected[1] ? `${selected[0]}'s auto-correlation` : `${selected[0]} \u00d7 ${selected[1]}`;
+    hint.textContent = `${what} has no data here. Click a cell to plot another baseline.`;
+    document.getElementById("waterfall").replaceChildren(hint);
   }
 });
 
@@ -187,7 +199,9 @@ function pageName() {
     return el ? el.selectedOptions[0]?.textContent.trim() : "";
   };
   const parts = ["surfvis", pick("field"), `scan${pick("scan")}`, pick("c")];
-  if (selected && document.querySelector("#waterfall .panel")) parts.push(`${selected[0]}-${selected[1]}`);
+  if (selected && document.querySelector("#waterfall .panel")) {
+    parts.push(selected[0] === selected[1] ? `${selected[0]}-auto` : `${selected[0]}-${selected[1]}`);
+  }
   return parts.filter(Boolean).join("_").replace(/[^A-Za-z0-9_.+-]+/g, "") + ".png";
 }
 

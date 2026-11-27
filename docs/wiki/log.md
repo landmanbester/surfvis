@@ -2,11 +2,18 @@
 type: log
 title: Wiki changelog
 description: Chronological record of what changed in the wiki and why.
-timestamp: 2026-11-26
-last_verified_commit: 2497dec
+timestamp: 2026-11-27
+last_verified_commit: c26cd15
 ---
 
 # Wiki changelog
+
+## 2026-11-27 — auto-correlation waterfalls (verified at `c26cd15`)
+
+- **web-app.md:** the heatmap's diagonal plots auto-correlation waterfalls:
+  the zarr's `autocorrelations` attr, `auto_corrs=True` and the padded
+  baselines it adds to an MS without autos, an auto's defaults (no model, no
+  χ², no mismatch note), and settings carried through the diagonal.
 
 ## 2026-11-26 — selection on the canvas (verified at `2497dec`)
 

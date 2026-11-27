@@ -3,8 +3,8 @@ type: reference
 title: Chi-squared browser
 description: How surfvis serve links surfchi2 output to on-demand baseline waterfalls, the waterfall's correction / Stokes / flag-version controls, and the xarray-ms facts it depends on.
 tags: [web, fastapi, htmx, xarray-ms, zarr]
-timestamp: 2026-11-26
-last_verified_commit: 2497dec
+timestamp: 2026-11-27
+last_verified_commit: c26cd15
 ---
 
 # Chi-squared browser
@@ -41,7 +41,8 @@ One group per `(field, spw, scan)`, holding that scan's totals:
 ```
 chi2.zarr/field{F}/spw{S}/scan{N}
   chi2, counts        (product, antenna1, antenna2), summed over the scan
-  attrs               ms, rcol, wcol, fcol, mcol, gtable, corr_labels, antenna_names
+  attrs               ms, rcol, wcol, fcol, mcol, gtable, corr_labels, antenna_names,
+                      autocorrelations (whether the scan has any; absent before c26cd15)
 ```
 
 The browser looks at one field, spw and scan at a time. `--ntimes` and
@@ -179,9 +180,26 @@ column given by its MSv4 name is translated back, so it is never listed twice.
 ## The grid
 
 The matrix holds each baseline twice, as `(p, q)` and `(q, p)`, so the header
-counts the upper triangle. Diagonal cells are autocorrelations, which `chi2`
-does not measure: they carry no `hx-get`, since the waterfall route would
-answer them with a 404 that renders as a broken image.
+counts the upper triangle. Diagonal cells are auto-correlations, which `chi2`
+does not measure, but whose waterfalls are worth seeing when flagging (RFI
+and a misbehaving receiver show there first). When the scan's
+`autocorrelations` attr is true, or absent (an older zarr), the diagonal is
+hatched and clickable; otherwise it carries no `hx-get`. An older zarr over
+an MS without autos gets a panel saying so (`_has_auto`, from
+`msdata.baseline_rows`) rather than a broken plot.
+
+For the waterfall to have them, `_open_partition` passes `auto_corrs=True`:
+xarray-ms drops auto-correlations by default. On an MS without any, xarray-ms
+pads one baseline per antenna as missing (NaN, flagged); cross baselines and
+the time grid are unchanged, and everything looks baselines up by name
+(`baseline_index`), never by position. An auto's panel names it "m004
+auto-correlation", shows no χ²/dof and no "no longer shows what the heatmap
+measured" note (the heatmap measured nothing there), and defaults the model
+to none: a predicted model's auto-correlations mean nothing when hunting
+RFI. Because of that different default, `app.js` merges what an auto's
+panel keeps into the carried settings instead of replacing them, so a model
+chosen on a cross-correlation survives arrowing through the diagonal.
+Flagging an auto works as on any baseline; its rows are never reversed.
 
 Fields are listed by `FIELD::NAME` (`msdata.field_names`, arcae), with the
 `FIELD_ID` as the option value; the zarr stays keyed by ID. If the MS cannot be
@@ -204,7 +222,8 @@ reads it for:
   `chi2` records every antenna), χ²/dof, baseline length. A custom element,
   not `title=`, which shows only after a delay;
 - **arrow-key navigation**: up/down change antenna1, left/right antenna2,
-  skipping the diagonal;
+  skipping cells that plot nothing (the diagonal, unless it plots
+  auto-correlations);
 - **following the selection.** The selected baseline is held by antenna
   *names*, since another scan can hold a different antenna set. When the
   heatmap re-renders (field, scan, bin or product) and a waterfall is open, the

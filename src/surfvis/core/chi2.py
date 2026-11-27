@@ -84,7 +84,7 @@ def chi2(
     xds = xds_from_ms(
         msname,
         chunks={"row": -1},
-        columns=["TIME", fcol],
+        columns=["TIME", "ANTENNA1", "ANTENNA2", fcol],
         group_cols=["FIELD_ID", "DATA_DESC_ID", "SCAN_NUMBER"],
         table_schema=schema,
     )
@@ -97,7 +97,11 @@ def chi2(
     tbin_counts = []
     fbin_idx = []
     fbin_counts = []
+    # Whether each scan has auto-correlations. chi2 skips them, but the browser
+    # plots their waterfalls from the heatmap's diagonal.
+    autos = []
     for ds in xds:
+        autos.append(bool((ds.ANTENNA1.values == ds.ANTENNA2.values).any()))
         time = ds.TIME.values
         ut, counts = np.unique(time, return_counts=True)
         utimes.append(ut)
@@ -180,9 +184,6 @@ def chi2(
     read = products_mod.needed(products, labels, full_jones=full_jones)
     read_idx = [labels.index(c) for c in read]
     nprod = len(products)
-    # Whether each scan has auto-correlations. chi2 skips them, but the browser
-    # plots their waterfalls from the heatmap's diagonal.
-    autos = dask.compute(*[(ds.ANTENNA1.data == ds.ANTENNA2.data).any() for ds in xds])
 
     # Only now, with the products, correlations and gains all validated: a run
     # that was going to fail must leave the previous outputs alone.
@@ -273,7 +274,7 @@ def chi2(
         products,
         antenna_names,
         msname,
-        {i: bool(a) for i, a in enumerate(autos)},
+        dict(enumerate(autos)),
         {
             "rcol": rcol,
             "wcol": wcol,

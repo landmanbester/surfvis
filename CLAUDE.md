@@ -49,7 +49,7 @@ docker run --rm --user "$(id -u):$(id -g)" -e HOME=/tmp -v "$PWD":/src -w /src \
    PYTHONPATH=/tmp/t:/src/src:/src /tmp/t/bin/pytest tests/ -q -W ignore"
 ```
 
-That is the only way to run the full suite (115 tests; the node one skips in the container). **CI does not run them** —
+That is the only way to run the full suite (119 tests; the node one skips in the container). **CI does not run them** —
 `.github/workflows/ci.yml` installs the lightweight package only, deliberately,
 since python-casacore and numba make CI slow and brittle. Verify locally.
 
@@ -156,6 +156,12 @@ standard (`RESIDUAL`) are not renamed. Mapping `CORRECTED_DATA` to
 `VISIBILITY` (as `DataGroup.resolve` once did) silently plots `DATA`. The
 other direction, `msdata.msv2_name`, is what menus and titles show: the UI
 speaks MSv2.
+
+**Partitions include auto-correlations, padded when absent.**
+`_open_partition` passes `auto_corrs=True` so the heatmap's diagonal can plot
+them; on an MS without any, xarray-ms adds one all-NaN, all-flagged baseline
+per antenna. Look baselines up by name (`baseline_index`), never by position
+or count. `chi2` still skips them and records `autocorrelations` per scan.
 
 **Baselines are presented upper-triangular.** xarray-ms converts a row stored
 as `ANTENNA1 > ANTENNA2` on read (conjugated, cross-hands swapped), so gains,
