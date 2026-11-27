@@ -81,7 +81,7 @@ Three layers, and the boundary between them is load-bearing:
 - **`web/`** is the browser: `store.py` (zarr), `msdata.py` (MS via xarray-ms
   and arcae), `render.py` (colours + PNGs), `planes.py` (waterfall reduction), `profiling.py` (`serve --profile`), `app.py` (FastAPI), `templates/`
   (htmx partials) and `static/app.js` (selection, hover readout, arrow keys,
-  carried settings, loading states, Save as PNG), and `static/wf/` (the canvas waterfall as ES modules, node-tested via `tests/test_js.py`; node is not in the container). `htmx.min.js` and
+  carried settings via `static/carry.mjs`, loading states, Save as PNG; a module), and `static/wf/` (the canvas waterfall as ES modules, node-tested via `tests/test_js.py`; node is not in the container). `htmx.min.js` and
   `html-to-image.js` are vendored, not loaded from a CDN: compute nodes are
   often offline. Dask-free. `flagging.py` is the one write path (below).
 - **`utils/products.py` and `utils/gains.py`** are the exception to "utils is

@@ -196,9 +196,12 @@ the time grid are unchanged, and everything looks baselines up by name
 auto-correlation", shows no χ²/dof and no "no longer shows what the heatmap
 measured" note (the heatmap measured nothing there), and defaults the model
 to none: a predicted model's auto-correlations mean nothing when hunting
-RFI. Because of that different default, `app.js` merges what an auto's
-panel keeps into the carried settings instead of replacing them, so a model
-chosen on a cross-correlation survives arrowing through the diagonal.
+RFI. Because of that different default, a model carried in from a
+cross-correlation would look like a default on the auto's panel and be
+dropped; `static/carry.mjs` holds it back and hands it on, unless the model
+is changed on the auto panel. Every other control follows the panel exactly,
+so resetting one on an auto takes effect (merging everything once let a
+reset flag version come back). `app.js` is a module for that import.
 Flagging an auto works as on any baseline; its rows are never reversed.
 
 Fields are listed by `FIELD::NAME` (`msdata.field_names`, arcae), with the

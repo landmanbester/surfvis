@@ -123,8 +123,9 @@ def test_flagging_an_auto_touches_only_its_rows(autos_zarr, tmp_path):
     ms = str(tmp_path / "flagme.ms")
     shutil.copytree(autos_zarr["ms"]["path"], ms)
     client = _client(autos_zarr["zarr"], ms, allow_flagging=True)
-    while client.get("/flag/state").json()["backup_state"] == "running":
-        pass
+    from tests.test_flagging import _wait_for_backup
+
+    _wait_for_backup(client)
 
     with table(ms, ack=False) as t:
         before = t.getcol("FLAG")

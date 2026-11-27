@@ -271,6 +271,8 @@ def create_app(
             return msdata.baseline_rows(ms_path, field, spw, scan, name, name)[0].size > 0
         except KeyError:  # an antenna the MS's ANTENNA table does not name
             return False
+        except Exception:  # noqa: BLE001 - an unreadable MS; check() reports it as for any baseline
+            return True
 
     def _resolve(column: str) -> str:
         """MSv2 name for a column, as the menus list them, whichever name it was given by."""
@@ -325,8 +327,9 @@ def create_app(
         settings = _waterfall_settings(matrix, product, column, model, gtable, flagversion, quantity, auto)
         base = {"field": field, "spw": spw, "scan": scan, "c": c, "p": p, "q": q}
         offered = _gain_tables()
-        if auto and not _has_auto(field, spw, scan, name1):
-            # Only a zarr from before chi2 recorded autos offers the diagonal without them.
+        if auto and matrix.autos is None and not _has_auto(field, spw, scan, name1):
+            # Only a zarr from before chi2 recorded autos offers the diagonal without
+            # them; when it says, the scan query (seconds on a large MS) is not needed.
             problems = [f"{name1} has no auto-correlation in scan {scan} of this Measurement Set"]
         elif not _allowed(settings["gtable"]):
             problems = [

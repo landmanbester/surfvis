@@ -14,7 +14,7 @@
   <header>
     <h1>surfvis</h1>
     <code class="ms" title="{{ ms }}">{{ ms }}</code>
-    <button type="button" id="save-png" onclick="savePng(this)"
+    <button type="button" id="save-png"
             title="Save the whole page, including what is scrolled out of view">Save as PNG</button>
   </header>
 
@@ -31,6 +31,7 @@
       <p class="hint">Click a cell in the grid to plot that baseline's waterfall.</p>
     </section>
   </main>
-  <script src="/static/app.js?v={{ static_version }}"></script>
+  <!-- A module, for its import of carry.mjs: deferred and strict, nothing global. -->
+  <script type="module" src="/static/app.js?v={{ static_version }}"></script>
 </body>
 </html>

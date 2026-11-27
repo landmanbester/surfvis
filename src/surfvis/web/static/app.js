@@ -1,3 +1,5 @@
+import { Carry } from "./carry.mjs";
+
 // Behaviour htmx does not cover: loading feedback, the selected baseline,
 // the hover readout, keyboard navigation, and carrying waterfall settings
 // from one baseline to the next.
@@ -35,22 +37,24 @@ document.body.addEventListener("htmx:beforeRequest", (e) => e.detail.target.clas
 document.body.addEventListener("htmx:afterRequest", (e) => e.detail.target.classList.remove("loading"));
 
 // A cell click carries the waterfall controls the user moved off the
-// heatmap's defaults (the server marks them .keep), so a choice survives a
-// change of baseline. An auto-correlation's panel has its own default model
-// (none), so it adds to what it was handed rather than replacing it: a model
-// chosen on a cross-correlation survives passing through the diagonal.
-let carried = {};
+// heatmap's defaults, so a choice survives a change of baseline (carry.mjs).
+const carry = new Carry();
 document.body.addEventListener("htmx:afterSettle", (e) => {
   if (e.detail.target.id !== "waterfall") return;
   const panel = e.detail.target.querySelector(".panel");
-  if (!panel) return;
+  if (!panel) return carry.reset();
   const keep = Object.fromEntries([...panel.querySelectorAll(".keep")].map((el) => [el.name, el.value]));
-  carried = panel.dataset.auto ? { ...carried, ...keep } : keep;
+  carry.settled(keep, Boolean(panel.dataset.auto));
+});
+
+document.body.addEventListener("change", (e) => {
+  const panel = e.target.closest("#waterfall .panel");
+  if (panel && e.target.name) carry.changed(e.target.name, Boolean(panel.dataset.auto));
 });
 
 document.body.addEventListener("htmx:configRequest", (e) => {
   if (!e.detail.elt.matches(".grid i[data-pq]")) return;
-  Object.assign(e.detail.parameters, carried);
+  Object.assign(e.detail.parameters, carry.params);
 });
 
 document.body.addEventListener("click", (e) => {
@@ -77,6 +81,7 @@ document.body.addEventListener("htmx:afterSettle", (e) => {
     const what = selected[0] === selected[1] ? `${selected[0]}'s auto-correlation` : `${selected[0]} \u00d7 ${selected[1]}`;
     hint.textContent = `${what} has no data here. Click a cell to plot another baseline.`;
     document.getElementById("waterfall").replaceChildren(hint);
+    carry.reset(); // no panel, so nothing to carry, as before a first click
   }
 });
 
@@ -241,3 +246,5 @@ async function savePng(button) {
     button.textContent = label;
   }
 }
+
+document.getElementById("save-png")?.addEventListener("click", (e) => savePng(e.currentTarget));
