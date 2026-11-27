@@ -211,6 +211,9 @@ def _open_partition(ms: str, field: int, spw: int, scan: int, generation: int) -
         partition_schema=list(PARTITION_SCHEMA),
         partition_key=(("FIELD_ID", field), ("DATA_DESC_ID", spw), ("SCAN_NUMBER", scan)),
         baseline_orientation=dict(_orientations(ms, _layout_stamp(ms))),
+        # The heatmap's diagonal plots them; on an MS without any, xarray-ms
+        # pads them as missing (NaN, flagged), which costs one baseline per antenna.
+        auto_corrs=True,
     )
 
 

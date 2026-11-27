@@ -16,7 +16,8 @@ function cellFor(names) {
   if (!data || !names) return null;
   const p = data.names.indexOf(names[0]);
   const q = data.names.indexOf(names[1]);
-  if (p < 0 || q < 0 || p === q) return null;
+  if (p < 0 || q < 0) return null;
+  // Null for the diagonal unless it plots auto-correlations: only then does it carry data-pq.
   return document.querySelector(`.grid i[data-pq="${p},${q}"]`);
 }
 
@@ -81,6 +82,7 @@ function describe(cell) {
   const data = gridData();
   const [p, q] = pq(cell);
   const value = data.values[p][q];
+  if (p === q) return [`${data.names[p]} (${p})`, "auto-correlation"];
   const names = `${data.names[p]} (${p}) \u00d7 ${data.names[q]} (${q})`;
   let stats = `\u03c7\u00b2/dof ${value === null ? "flagged" : value.toFixed(2)}`;
   if (data.positions) {
@@ -119,7 +121,8 @@ document.body.addEventListener("mousemove", (e) => {
 });
 
 // Arrow keys move the selection: up/down change antenna1 (the row),
-// left/right antenna2 (the column), skipping the diagonal.
+// left/right antenna2 (the column), skipping cells that plot nothing (the
+// diagonal, unless the MS has auto-correlations).
 document.addEventListener("keydown", (e) => {
   const steps = { ArrowUp: [-1, 0], ArrowDown: [1, 0], ArrowLeft: [0, -1], ArrowRight: [0, 1] };
   if (!(e.key in steps) || e.target.closest("input, select, textarea")) return;
@@ -132,12 +135,13 @@ document.addEventListener("keydown", (e) => {
   const n = data.names.length;
   let [p, q] = pq(current);
   const [dp, dq] = steps[e.key];
-  do {
+  let next = null;
+  for (let step = 0; step < n && !next; step++) {
     p = (p + dp + n) % n;
     q = (q + dq + n) % n;
-  } while (p === q);
-  const next = document.querySelector(`.grid i[data-pq="${p},${q}"]`);
-  if (!next) return;
+    next = document.querySelector(`.grid i[data-pq="${p},${q}"]`);
+  }
+  if (!next || next === current) return;
   next.click();
   showReadout(next);
 });

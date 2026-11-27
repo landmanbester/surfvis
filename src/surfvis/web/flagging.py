@@ -624,7 +624,8 @@ class Flagger:
                 row_set=np.flatnonzero(new_row & ~flag_row),
                 cells=summary["cells"],
                 newly_flagged=summary["newly_flagged"],
-                description=f"{name1}-{name2} field {field_id} spw {spw} scan {scan}",
+                description=f"{name1 + ' auto' if name1 == name2 else name1 + '-' + name2} "
+                f"field {field_id} spw {spw} scan {scan}",
                 field=field_id,
                 spw=spw,
                 scan=scan,

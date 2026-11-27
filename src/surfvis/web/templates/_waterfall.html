@@ -1,9 +1,14 @@
 <div class="panel">
   <div class="panel-head">
+    {% if auto %}
+    <h2>{{ name1 }} auto-correlation</h2>
+    <p class="meta">scan {{ base.scan }} &middot; no &chi;<sup>2</sup>: chi2 skips auto-correlations</p>
+    {% else %}
     <h2>{{ name1 }} &times; {{ name2 }}</h2>
     <p class="meta">
       &chi;<sup>2</sup>/dof {{ "%.2f"|format(value) }} over scan {{ base.scan }}
     </p>
+    {% endif %}
   </div>
 
   <form class="controls sub"
@@ -91,7 +96,7 @@
     </div>
     {% endif %}
     <div class="plot loading" data-label="Reading visibilities&hellip;">
-      <canvas class="wf-canvas" aria-label="Waterfall for baseline {{ name1 }} to {{ name2 }}"></canvas>
+      <canvas class="wf-canvas" aria-label="Waterfall for {% if auto %}the auto-correlation of {{ name1 }}{% else %}baseline {{ name1 }} to {{ name2 }}{% endif %}"></canvas>
     </div>
     <p class="axis wf-readout">wheel: zoom &middot; shift-drag or middle-drag: pan &middot; 0: reset{% if flagging %} &middot; drag: rectangle &middot; click: polygon &middot; Enter: close, then flag &middot; Esc: cancel &middot; Ctrl/Cmd-Z: undo{% endif %}</p>
   </div>

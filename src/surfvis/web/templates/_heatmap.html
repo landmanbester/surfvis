@@ -25,7 +25,11 @@
         </div>
         <!-- One waterfall request at a time: a new click or arrow key aborts the last. -->
         <div class="grid" hx-sync="this:replace">
-          {% for p in range(nant) %}{% for q in range(nant) %}{% if p == q %}<i
+          {% for p in range(nant) %}{% for q in range(nant) %}{% if p == q and autos %}<i
+            class="auto plotted"
+            hx-get="/waterfall?{{ query }}&p={{ p }}&q={{ q }}"
+            hx-target="#waterfall"
+            data-pq="{{ p }},{{ q }}"></i>{% elif p == q %}<i
             class="auto"
             style="background:{{ colours[p][q] }}"></i>{% else %}<i
             style="background:{{ colours[p][q] }}"
@@ -34,7 +38,7 @@
             data-pq="{{ p }},{{ q }}"></i>{% endif %}{% endfor %}{% endfor %}
         </div>
       </div>
-      <p class="axis readout" id="readout">columns: antenna2 &middot; rows: antenna1 &middot; hover for a baseline, arrow keys to move</p>
+      <p class="axis readout" id="readout">columns: antenna2 &middot; rows: antenna1 &middot; hover for a baseline, arrow keys to move{% if autos %} &middot; diagonal: auto-correlations{% endif %}</p>
     </div>
 
     <figure class="hist">

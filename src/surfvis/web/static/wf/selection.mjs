@@ -149,7 +149,8 @@ export function confirmLabel(dry) {
 // The undo button's label for an edit summary from the server.
 export function undoLabel(edit) {
   const [a, b] = edit.antennas;
-  return `Undo ${a}–${b}, scan ${edit.scan}, ${edit.newly_flagged.toLocaleString("en-US")} cells`;
+  const baseline = a === b ? `${a} auto` : `${a}–${b}`;
+  return `Undo ${baseline}, scan ${edit.scan}, ${edit.newly_flagged.toLocaleString("en-US")} cells`;
 }
 
 // Whether an edit is on the baseline a panel shows, whichever order the panel names it in.

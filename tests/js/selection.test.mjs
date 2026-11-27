@@ -128,6 +128,7 @@ test("labels", () => {
   );
   assert.match(confirmLabel({ cells: 10, newly_flagged: 0, correlations: ["XX"] }), /^Nothing new to flag/);
   assert.equal(undoLabel({ antennas: ["m000", "m001"], scan: 3, newly_flagged: 1234 }), "Undo m000–m001, scan 3, 1,234 cells");
+  assert.equal(undoLabel({ antennas: ["m004", "m004"], scan: 1, newly_flagged: 72 }), "Undo m004 auto, scan 1, 72 cells");
 });
 
 test("an edit is on the panel's baseline in either order, in the same partition", () => {

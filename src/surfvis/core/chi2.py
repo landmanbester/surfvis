@@ -180,6 +180,9 @@ def chi2(
     read = products_mod.needed(products, labels, full_jones=full_jones)
     read_idx = [labels.index(c) for c in read]
     nprod = len(products)
+    # Whether each scan has auto-correlations. chi2 skips them, but the browser
+    # plots their waterfalls from the heatmap's diagonal.
+    autos = dask.compute(*[(ds.ANTENNA1.data == ds.ANTENNA2.data).any() for ds in xds])
 
     # Only now, with the products, correlations and gains all validated: a run
     # that was going to fail must leave the previous outputs alone.
@@ -270,6 +273,7 @@ def chi2(
         products,
         antenna_names,
         msname,
+        {i: bool(a) for i, a in enumerate(autos)},
         {
             "rcol": rcol,
             "wcol": wcol,
@@ -361,13 +365,15 @@ def _write_zarr_dataset(
     products,
     antenna_names,
     msname,
+    autos,
     columns,
 ):
     """Write each scan's chi-squared and counts to a zarr store.
 
     One group per (field, spw, scan), holding ``(product, antenna1,
     antenna2)`` sums over the whole scan. ``columns`` records how the quantity
-    was formed, so a reader can reproduce it.
+    was formed, so a reader can reproduce it; ``autos`` whether each scan has
+    auto-correlations (``autocorrelations``, which ``serve`` reads).
     """
     import xarray as xr
 
@@ -390,6 +396,6 @@ def _write_zarr_dataset(
                 "antenna1": np.arange(nant),
                 "antenna2": np.arange(nant),
             },
-            attrs={**attrs, "field": field, "spw": spw, "scan": scan},
+            attrs={**attrs, "field": field, "spw": spw, "scan": scan, "autocorrelations": autos[i]},
         )
         ds.to_zarr(dataout, group=f"field{field}/spw{spw}/scan{scan}", mode="a")

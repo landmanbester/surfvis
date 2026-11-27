@@ -242,6 +242,8 @@ def create_app(
                 "scales": render.SCALES,
                 "product": c,
                 "grid": grid,
+                # The diagonal plots auto-correlations; unknown (None) for an older zarr, so offered.
+                "autos": matrix.autos is not False,
             },
         )
 
@@ -263,20 +265,32 @@ def create_app(
             png = render.histogram_png(matrix.chi2_dof, norm)
         return Response(png, media_type="image/png")
 
+    def _has_auto(field: int, spw: int, scan: int, name: str) -> bool:
+        """Whether the MS holds ``name``'s auto-correlation in this scan."""
+        try:
+            return msdata.baseline_rows(ms_path, field, spw, scan, name, name)[0].size > 0
+        except KeyError:  # an antenna the MS's ANTENNA table does not name
+            return False
+
     def _resolve(column: str) -> str:
         """MSv2 name for a column, as the menus list them, whichever name it was given by."""
         return msdata.msv2_name(column)
 
-    def _waterfall_settings(matrix, product, column, model, gtable, flagversion, quantity):
+    def _waterfall_settings(matrix, product, column, model, gtable, flagversion, quantity, auto=False):
         """Fill unset waterfall controls from how chi2 formed the heatmap.
 
         ``None`` means "not given", so the heatmap's setting applies; an empty
-        string is a deliberate "none" (no model, no gains).
+        string is a deliberate "none" (no model, no gains). An
+        auto-correlation (``auto``) has no heatmap value to match, and a
+        model's auto-correlations mean nothing when hunting RFI, so its
+        model defaults to none.
         """
+        if model is None:
+            model = "" if auto else matrix.mcol
         return {
             "product": product or matrix.selection.product,
             "column": _resolve(column or matrix.rcol),
-            "model": _resolve(matrix.mcol if model is None else model),
+            "model": _resolve(model),
             "gtable": matrix.gtable if gtable is None else gtable.strip(),
             "flagversion": flagversion or "",
             "quantity": quantity,
@@ -307,10 +321,14 @@ def create_app(
         """
         matrix = _matrix(field, spw, scan, c)
         name1, name2 = _baseline(matrix, p, q)
-        settings = _waterfall_settings(matrix, product, column, model, gtable, flagversion, quantity)
+        auto = name1 == name2
+        settings = _waterfall_settings(matrix, product, column, model, gtable, flagversion, quantity, auto)
         base = {"field": field, "spw": spw, "scan": scan, "c": c, "p": p, "q": q}
         offered = _gain_tables()
-        if not _allowed(settings["gtable"]):
+        if auto and not _has_auto(field, spw, scan, name1):
+            # Only a zarr from before chi2 recorded autos offers the diagonal without them.
+            problems = [f"{name1} has no auto-correlation in scan {scan} of this Measurement Set"]
+        elif not _allowed(settings["gtable"]):
             problems = [
                 f"gain table {settings['gtable']!r} is not one this server offers; "
                 "pass it to surfvis serve with --gtable, or put it in a *.qc directory next to the MS"
@@ -327,7 +345,7 @@ def create_app(
                 gtable=settings["gtable"],
                 flagversion=settings["flagversion"],
             )
-        defaults = _waterfall_settings(matrix, "", "", None, None, "", "amp")
+        defaults = _waterfall_settings(matrix, "", "", None, None, "", "amp", auto)
         # Controls the user moved off the heatmap's setting. Clicking another
         # cell sends these along, so a choice survives a change of baseline.
         keep = {key for key, value in settings.items() if value != defaults[key]}
@@ -339,6 +357,7 @@ def create_app(
                 "query": urlencode({**base, **settings}),
                 "name1": name1,
                 "name2": name2,
+                "auto": auto,
                 "gtables": list(offered.values()),
                 "value": float(matrix.chi2_dof[p, q]),
                 # The column is corrected and has a model subtracted, so only
@@ -351,7 +370,8 @@ def create_app(
                 "s": settings,
                 "matrix": matrix,
                 "keep": keep,
-                "differs": bool(keep - {"quantity"}),
+                # The heatmap measured nothing on its diagonal, so there is nothing to differ from.
+                "differs": not auto and bool(keep - {"quantity"}),
                 "problems": problems,
                 # What a selection drawn on this panel is posted with (see /flag).
                 "flagging": flagger is not None,
@@ -386,7 +406,7 @@ def create_app(
     ):
         matrix = _matrix(field, spw, scan, c)
         name1, name2 = _baseline(matrix, p, q)
-        settings = _waterfall_settings(matrix, product, column, model, gtable, flagversion, quantity)
+        settings = _waterfall_settings(matrix, product, column, model, gtable, flagversion, quantity, name1 == name2)
         if not _allowed(settings["gtable"]):
             raise HTTPException(status_code=403, detail="That gain table is not one this server offers.")
         try:
@@ -434,7 +454,7 @@ def create_app(
             raise HTTPException(status_code=400, detail=f"quantity must be one of {msdata.QUANTITIES}")
         matrix = _matrix(field, spw, scan, c)
         name1, name2 = _baseline(matrix, p, q)
-        settings = _waterfall_settings(matrix, product, column, model, gtable, flagversion, quantity)
+        settings = _waterfall_settings(matrix, product, column, model, gtable, flagversion, quantity, name1 == name2)
         settings.pop("quantity")
         if not _allowed(settings["gtable"]):
             raise HTTPException(status_code=403, detail="That gain table is not one this server offers.")
@@ -465,7 +485,10 @@ def create_app(
             with profiling.span("colour_limits"):
                 wf.limits[quantity] = planes.colour_limits(wf.plane, wf.flags, quantity)
         vmin, vmax = wf.limits[quantity]
-        length = f" ({wf.length:.0f} m)" if wf.length is not None else ""
+        if wf.antenna1 == wf.antenna2:
+            baseline = f"{wf.antenna1} auto"
+        else:
+            baseline = f"{wf.antenna1}-{wf.antenna2}" + (f" ({wf.length:.0f} m)" if wf.length is not None else "")
         header = {
             "t0": t0,
             "t1": t1,
@@ -479,7 +502,7 @@ def create_app(
             "vmax": vmax,
             "quantity": quantity,
             "colormap": "twilight" if quantity == "phase" else "viridis",
-            "title": f"{wf.antenna1}-{wf.antenna2}{length}   scan {wf.scan}   {wf.column}   {quantity}   {wf.product}",
+            "title": f"{baseline}   scan {wf.scan}   {wf.column}   {quantity}   {wf.product}",
         }
         if meta:
             header["times"] = [float(x) for x in wf.times] if wf.times is not None else None

@@ -30,6 +30,7 @@ def make_ms(
     hot: tuple[int, int] | None = (1, 5),
     hot_scale: float = 25.0,
     seed: int = 42,
+    autos: bool = False,
 ) -> dict:
     """Write a Measurement Set with a known bad baseline.
 
@@ -43,6 +44,9 @@ def make_ms(
         hot: ``(p, q)`` antenna pair whose residuals are inflated, or None.
         hot_scale: Factor applied to the hot baseline's residuals.
         seed: RNG seed.
+        autos: Also write each antenna's auto-correlation, as interferometers
+            usually do (after the cross-correlations, so baselines keep
+            their row positions within a time slot otherwise).
 
     Returns:
         A dict describing what was written, including the hot baseline.
@@ -51,6 +55,8 @@ def make_ms(
 
     rng = np.random.default_rng(seed)
     baselines = [(p, q) for p in range(nant) for q in range(p + 1, nant)]
+    if autos:
+        baselines += [(p, p) for p in range(nant)]
     nbl = len(baselines)
     nrow = nbl * ntime * nscan
 

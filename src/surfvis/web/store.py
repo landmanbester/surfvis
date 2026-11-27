@@ -70,6 +70,7 @@ class Chi2Store:
             rcol=str(ds.attrs["rcol"]),
             mcol=str(ds.attrs.get("mcol", "")),
             gtable=str(ds.attrs.get("gtable", "")),
+            autos=_autos(ds.attrs.get("autocorrelations")),
         )
 
     def attrs(self, field: int, spw: int, scan: int) -> dict:
@@ -115,6 +116,9 @@ class Matrix:
     # How chi2 formed the quantity; empty when not used.
     mcol: str = ""
     gtable: str = ""
+    # Whether the scan has auto-correlations; None for a zarr from before
+    # chi2 recorded it.
+    autos: bool | None = None
 
     @property
     def finite(self) -> np.ndarray:
@@ -126,6 +130,11 @@ class Matrix:
         """Baselines with unflagged data. The grid holds each one twice, as (p, q) and (q, p)."""
         valid = ~np.isnan(self.chi2_dof)
         return int(np.triu(valid | valid.T, k=1).sum())
+
+
+def _autos(value) -> bool | None:
+    """The ``autocorrelations`` attribute, which a zarr store may hand back as a numpy bool."""
+    return None if value is None else bool(value)
 
 
 @lru_cache(maxsize=32)
