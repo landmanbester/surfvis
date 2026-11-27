@@ -656,8 +656,7 @@ def create_app(
     job: dict = {"state": "idle"}
     job_lock = threading.Lock()
 
-    def _run_recompute(field: int, spw: int, scan: int, pairs: list[tuple[int, int]]) -> None:
-        started = time.time()  # before FLAG is read: edits made meanwhile stay stale
+    def _run_recompute(field: int, spw: int, scan: int, pairs: list[tuple[int, int]], started: float) -> None:
 
         def progress(done: int, total: int) -> None:
             job.update(rows_done=done, rows_total=total)
@@ -666,7 +665,7 @@ def create_app(
             attrs = store.attrs(field, spw, scan)
             products = store.products(field, spw, scan)
             chi2, counts = recompute.cells(ms_path, attrs, products, field, spw, scan, pairs, progress)
-            store.write_cells(field, spw, scan, pairs, chi2, counts, started)
+            store.write_cells(field, spw, scan, pairs, chi2, counts, started, ms=ms_path)
             job.update(state="done", finished=time.time())
         except Exception as exc:  # noqa: BLE001 - reported through /recompute/state
             job.update(state="failed", error=f"{type(exc).__name__}: {exc}", finished=time.time())
@@ -688,8 +687,14 @@ def create_app(
         with job_lock:
             if job.get("state") == "running":
                 raise HTTPException(status_code=409, detail="A recompute is already running")
+            # Before FLAG is read, and never inside a flag write or undo (which
+            # hold the lock until their audit line is stamped): edits logged
+            # after this stay stale.
+            with flagger._lock:
+                started = time.time()
             job.clear()
             job.update(
+                id=time.time_ns() // 1000,  # microseconds: exact as a JS number
                 state="running",
                 field=req.field,
                 spw=req.spw,
@@ -699,7 +704,10 @@ def create_app(
                 rows_total=0,
             )
         threading.Thread(
-            target=_run_recompute, args=(req.field, req.spw, req.scan, pairs), name="surfvis-recompute", daemon=True
+            target=_run_recompute,
+            args=(req.field, req.spw, req.scan, pairs, started),
+            name="surfvis-recompute",
+            daemon=True,
         ).start()
         return dict(job)
 

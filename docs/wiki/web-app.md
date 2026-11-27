@@ -421,8 +421,13 @@ and the selection tool in `static/wf/` (see "Selection on the canvas"). Terms
   edit and puts it back.
 - **Stale cells.** Staleness is per cell. `Chi2Store.cell_times` is when each
   cell's χ² was computed: the group's `computed` array, else its `created`,
-  else (an older zarr) the directory's mtime, which is when `chi2` finished,
-  so an edit made while it ran is missed. `flagging.stale_cells` walks the
+  else (an older zarr) the group directory's mtime, which is when `chi2`
+  wrote it, so an edit made while it ran is missed. Not the root's mtime:
+  every recompute re-consolidates at the root, which used to clear every
+  other scan's stale marks. An audit line's `unix` is stamped when the write
+  is complete (FLAG written and fsynced), not when the edit was built: a
+  recompute that started during a slow write read the old FLAG, yet was
+  newer than the edit's stamp, and its cells passed as fresh. `flagging.stale_cells` walks the
   audit log: a cell is stale if an edit touching it was applied after the
   cell's time and is still applied, or applied before and undone (or rolled
   back) after it; an apply and its undo both after cancel. The diagonal is
@@ -453,13 +458,19 @@ and the selection tool in `static/wf/` (see "Selection on the canvas"). Terms
   Every product is recomputed for the stale cells; the cost is the reads.
   `Chi2Store.write_cells` sets both triangles of `chi2` and `counts`, stamps
   the cells' `computed` with the time the job **started** (before it read
-  FLAG, so an edit made meanwhile stays stale), bumps `recomputed_cells`,
+  FLAG, so an edit made meanwhile stays stale; taken under the `Flagger`
+  lock, so never mid-write), bumps `recomputed_cells`, records
+  `recomputed_ms` (serve's `--ms` need not be the zarr's `ms`),
   and re-consolidates. Adding `computed` goes through xarray (for its
   dimension names), whose append mode replaced the group's attrs: they are
   saved through zarr and put back. `computed` is written last, so a kill
-  mid-write leaves the cells stale, to be recomputed again. The browser
-  polls the job, then redraws the heatmap without re-requesting the
-  waterfall. `--imagesout` PNGs are not touched.
+  mid-write leaves the cells stale, to be recomputed again (a heatmap read
+  between the `chi2` and `counts` writes can see a mixed cell, still marked
+  stale). The browser polls the job by its id (another tab's job or a
+  restart ends the poll and re-enables the button), then fetches the
+  heatmap and swaps it in itself, dropping it if the user has moved to
+  another scan: an htmx swap would follow the waterfall, and a flag to
+  suppress that leaked when the request failed. `--imagesout` PNGs are not touched.
 - **Never open a possibly broken MS in the server process.** `_opens()`
   probes in a child process: a failed arcae open of the broken MS left a read
   lock in casacore's in-process lock registry (`FileLocker::acquire` waits on

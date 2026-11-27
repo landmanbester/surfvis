@@ -244,3 +244,50 @@ def test_an_edit_made_while_recomputing_stays_stale(served):
     assert stale["cells"] == [[0, 2]] and stale["recomputed"] == 1
     entries = [json.loads(line) for line in open(flagging.audit_path(ms))]
     assert entries[-1]["unix"] > started
+
+
+@needs_web
+def test_an_edit_is_logged_once_its_write_is_complete(served, monkeypatch):
+    """A recompute that starts mid-write reads FLAG from before it, so the edit must log as newer than that start."""
+    from surfvis.web import flagging
+
+    client, ms = served["client"], served["ms"]
+    finished = []
+    real = flagging._put_cells
+
+    def slow(table, edit, on):
+        real(table, edit, on)
+        time.sleep(0.2)
+        finished.append(time.time())
+
+    monkeypatch.setattr(flagging, "_put_cells", slow)
+    body = {"field": 0, "spw": 0, "scan": 1, "p": 0, "q": 2, "product": "XX", "vertices": _rect(1, 2, 2, 4)}
+    client.post("/flag", json=body)
+    client.post("/flag/undo", json={"id": client.get("/flag/state").json()["edits"][-1]["id"]})
+    entries = [json.loads(line) for line in open(flagging.audit_path(ms))]
+    assert [e["event"] for e in entries] == ["apply", "undo"]
+    assert entries[0]["unix"] > finished[0] and entries[1]["unix"] > finished[1]
+
+
+@needs_web
+def test_recomputing_one_scan_of_an_older_zarr_leaves_the_others_stale(served):
+    """Without created, each group falls back to its own directory's time, which a recompute elsewhere leaves alone."""
+    import zarr as zarr_
+
+    from surfvis.web.store import _open_group
+
+    client, zarr = served["client"], served["zarr"]
+    root = zarr_.open_group(str(zarr), mode="r+")
+    for scan in (1, 2):
+        del root[f"field0/spw0/scan{scan}"].attrs["created"]
+    zarr_.consolidate_metadata(str(zarr))
+    _open_group.cache_clear()
+    time.sleep(0.05)
+    for scan in (1, 2):
+        body = {"field": 0, "spw": 0, "scan": scan, "p": 0, "q": 2, "product": "XX", "vertices": _rect(1, 2, 2, 4)}
+        assert client.post("/flag", json=body).status_code == 200
+    client.post("/recompute", json={"field": 0, "spw": 0, "scan": 1})
+    assert _wait_for_job(client)["state"] == "done"
+    assert client.get("/stale?field=0&spw=0&scan=1").json()["cells"] == []
+    assert client.get("/stale?field=0&spw=0&scan=2").json()["cells"] == [[0, 2]]
+    assert _zarr_cells(zarr, 0, 0, 1)[2]["recomputed_ms"] == served["ms"]

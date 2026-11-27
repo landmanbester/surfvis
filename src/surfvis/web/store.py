@@ -83,15 +83,16 @@ class Chi2Store:
 
         ``computed`` once ``serve`` has recomputed any cell; before that the
         group's ``created`` (when chi2 started), or for an older zarr the
-        directory's mtime (when chi2 finished, so edits made while it ran
-        are missed).
+        group directory's mtime (when chi2 finished writing it, so edits made
+        while it ran are missed). The group's own directory, not the root's:
+        every recompute re-consolidates at the root.
         """
         ds = self.group(field, spw, scan)
         if "computed" in ds:
             return np.asarray(ds["computed"].values, dtype=float)
         since = ds.attrs.get("created")
         if since is None:
-            since = os.path.getmtime(self.path)
+            since = os.path.getmtime(self.path / f"field{field}" / f"spw{spw}" / f"scan{scan}")
         nant = len(ds.attrs["antenna_names"])
         return np.full((nant, nant), float(since))
 
@@ -114,6 +115,7 @@ class Chi2Store:
         chi2: np.ndarray,
         counts: np.ndarray,
         started: float,
+        ms: str | None = None,
     ) -> None:
         """Replace the given cells' chi-squared and counts (both triangles), stamped ``started``.
 
@@ -123,14 +125,16 @@ class Chi2Store:
             counts: Same shape.
             started: When the recompute began, before it read FLAG: the cells'
                 new ``computed`` time.
+            ms: The Measurement Set the cells were read from, recorded as
+                ``recomputed_ms`` (serve's ``--ms`` need not be chi2's ``ms``).
         """
         import xarray as xr_
 
         key = f"field{field}/spw{spw}/scan{scan}"
         times = self.cell_times(field, spw, scan)
         ds = self.group(field, spw, scan)
-        # xarray's append mode replaces the group's attrs with the dataset's:
-        # keep chi2's own, through zarr, and put them back.
+        # chi2's attrs must survive adding a variable; some xarray versions'
+        # append mode has replaced a group's attrs with the dataset's.
         saved = dict(zarr.open_group(str(self.path), mode="r")[key].attrs)
         if "computed" not in ds:
             # Through xarray, so the new variable carries its dimension names.
@@ -152,6 +156,8 @@ class Chi2Store:
         group["computed"][:] = times
         group.attrs["recomputed_cells"] = int(group.attrs.get("recomputed_cells", 0)) + len(pairs)
         group.attrs["recomputed_at"] = float(started)
+        if ms is not None:
+            group.attrs["recomputed_ms"] = os.path.abspath(ms)
         zarr.consolidate_metadata(str(self.path))
         _open_group.cache_clear()
 

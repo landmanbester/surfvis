@@ -1020,7 +1020,10 @@ class Flagger:
                     _fsync(os.path.join(self.ms, name))
                 _fsync(self.ms)
                 if entry is not None:
-                    append_log(self.ms, entry)
+                    # Stamped now, with FLAG written and synced: anything that
+                    # read FLAG before this moment (a recompute, chi2) is older.
+                    now = time.time()
+                    append_log(self.ms, {**entry, "unix": now, "time": _utc(now)})
                 _clear_journal(self.ms)
             except BaseException as exc:
                 self._put_back(exc)

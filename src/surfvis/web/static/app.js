@@ -70,11 +70,6 @@ document.body.addEventListener("click", (e) => {
 document.body.addEventListener("htmx:afterSettle", (e) => {
   if (e.detail.target.id !== "heatmap") return;
   markSelected();
-  // A redraw after a recompute: the same scan, so the waterfall stays as it is.
-  if (refreshing) {
-    refreshing = false;
-    return;
-  }
   // A new field, scan, bin or product: follow the selected baseline into it,
   // rather than leave a waterfall from somewhere else on screen.
   if (!selected || !document.querySelector("#waterfall .panel")) return;
@@ -137,8 +132,9 @@ document.body.addEventListener("htmx:afterSettle", (e) => {
 document.addEventListener("surfvis:flagged", refreshStale);
 
 // Recompute: start the server's background job, show its progress, and
-// redraw the heatmap when it is done (without re-requesting the waterfall).
-let refreshing = false;
+// redraw the heatmap when it is done. The redraw is swapped in here rather
+// than through htmx, so the waterfall is not followed (it is the same scan),
+// and it is dropped if the user has moved to another heatmap meanwhile.
 function recomputeStatus(text, error = false) {
   const status = document.querySelector("#stale-note .recompute-status");
   if (!status) return;
@@ -146,25 +142,54 @@ function recomputeStatus(text, error = false) {
   status.classList.toggle("error", error);
 }
 
-async function pollRecompute(where) {
+function recomputeButton(enabled) {
+  const button = document.getElementById("recompute");
+  if (button) button.disabled = !enabled;
+}
+
+async function redrawHeatmap(where) {
+  const query = gridData()?.query;
+  if (!query) return;
+  const res = await fetch(`/heatmap?${query}`);
+  if (!res.ok) throw new Error(`Could not redraw the heatmap (HTTP ${res.status}); reload the page`);
+  const html = await res.text();
+  if (!sameScan(gridData()?.where, where)) return; // the user moved on
+  const target = document.getElementById("heatmap");
+  target.innerHTML = html;
+  htmx.process(target);
+  markSelected();
+  markStale(gridData()?.stale);
+  target.querySelectorAll("img[data-plot]:not([src])").forEach(loadPlot);
+}
+
+async function pollRecompute(where, id) {
   for (;;) {
     await new Promise((r) => setTimeout(r, 1000));
     let job;
     try {
       job = await (await fetch("/recompute/state")).json();
     } catch (err) {
+      recomputeButton(true);
       return recomputeStatus(`Lost track of the recompute: ${err.message}`, true);
     }
     if (!sameScan(gridData()?.where, where)) return; // the user moved on; the job carries on
-    recomputeStatus(jobText(job), job.state === "failed");
-    if (job.state === "failed") return;
-    if (job.state === "done") {
-      const query = gridData()?.query;
-      if (!query) return;
-      refreshing = true;
-      htmx.ajax("GET", `/heatmap?${query}`, { target: "#heatmap" });
-      return;
+    if (job.id !== id) {
+      // Another tab started a job since, or the server restarted: ours is over.
+      recomputeButton(true);
+      return recomputeStatus("The recompute's outcome is unknown; reload to see the cells.", true);
     }
+    if (job.state === "running") {
+      recomputeStatus(jobText(job));
+      continue;
+    }
+    recomputeStatus(jobText(job), job.state !== "done");
+    if (job.state !== "done") return recomputeButton(true);
+    try {
+      await redrawHeatmap(where);
+    } catch (err) {
+      recomputeStatus(err.message, true);
+    }
+    return;
   }
 }
 
@@ -187,7 +212,7 @@ document.body.addEventListener("click", async (e) => {
       return;
     }
     recomputeStatus(jobText(job));
-    pollRecompute(where);
+    pollRecompute(where, job.id);
   } catch (err) {
     recomputeStatus(err.message, true);
     button.disabled = false;
