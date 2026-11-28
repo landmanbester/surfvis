@@ -762,17 +762,29 @@ def create_app(
     def healthz():
         return {"status": "ok", "scans": len(store.scans), "ms": ms_path, "flagging": flagger is not None}
 
-    def shutdown(timeout: float = 120.0) -> None:
+    def shutdown() -> None:
         """Stop writing before the process exits (``server.run`` calls this).
 
         A recompute stops at its next chunk; a zarr write or flag write in
-        progress finishes, and both locks stay held so none starts after.
-        Reads are left to die with the process.
+        progress finishes, however long it takes (a signal meanwhile exits at
+        once, and the journal recovers the write), and both locks stay held
+        so none starts after. Reads are left to die with the process.
         """
         stopping.set()
-        zarr_lock.acquire(timeout=timeout)
+        _hold(zarr_lock, "a recompute's write to the zarr")
         if flagger is not None:
-            flagger._lock.acquire(timeout=timeout)
+            _hold(flagger._lock, "a flag write")
+            flagging._LIVE.discard(flagger)  # waited for here; atexit need not
+
+    def _hold(lock: threading.Lock, what: str) -> None:
+        if lock.acquire(timeout=1):
+            return
+        try:
+            print(f"surfvis: waiting for {what} to finish (signal again to abandon it)", file=sys.stderr, flush=True)
+        except OSError:  # a hung-up terminal
+            pass
+        while not lock.acquire(timeout=1):  # in steps, so a signal is handled
+            pass
 
     app.state.shutdown = shutdown
     return app

@@ -13,6 +13,8 @@ last_verified_commit: 7f526ca
 - **web-app.md:** new section on `web/server.py`: SIGHUP/SIGINT/SIGTERM all
   shut down gracefully within seconds, writes in progress finish, then
   `os._exit` past reading threads.
+- **web-app.md:** after review: nohup respected, flag writes waited for
+  without a cap, the probe's death signal set inside the probe.
 
 ## 2026-11-28 — "none" in the flags menu (verified at `7f526ca`)
 

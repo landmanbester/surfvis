@@ -519,14 +519,17 @@ large MS kept a "stopped" server alive for minutes.
 
 `server.run` maps SIGHUP onto uvicorn's graceful shutdown, gives open requests
 `GRACE` (3 s), then calls `app.state.shutdown`: a recompute stops at its next
-chunk without writing, and a zarr write or flag write in progress finishes,
-with both locks then held so none starts. Then `os._exit`, the only way past a
-worker thread blocked in a read; reads lose nothing. A second signal during
-shutdown exits at once, leaving an interrupted flag write to the journal. The
-MS probe child (`flagging._opens`) has `PR_SET_PDEATHSIG`, so it dies with the
-server even on SIGKILL. `tests/test_shutdown.py` runs the real command with a
-request in flight and sends each signal. `--reload` (development only) still
-runs plain `uvicorn.run`.
+chunk without writing, and a zarr write or flag write in progress finishes
+however long it takes (it says so on stderr), with both locks then held so
+none starts. Then `os._exit`, the only way past a worker thread blocked in a
+read; reads lose nothing. A signal during that wait exits at once, leaving
+the interrupted flag write to the journal. Under `nohup` (SIGHUP already
+ignored) a hangup stays ignored. The MS probe child (`flagging._PROBE`) sets
+`PR_SET_PDEATHSIG` itself, so it dies with the server even on SIGKILL; a
+`preexec_fn` would be unsafe in the threaded server. `tests/test_shutdown.py`
+runs the real command with a request in flight and sends each signal, checks
+nohup, and kills a probe's parent. `--reload` (development only) still runs
+plain `uvicorn.run`, so it has none of this.
 
 ## Profiling (`serve --profile DIR`)
 

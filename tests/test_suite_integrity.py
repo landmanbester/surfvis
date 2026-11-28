@@ -25,7 +25,7 @@ EXPECTED = {
     "test_commands.py": (10, 10),
     "test_flagging.py": (23, 23),
     "test_scopes.py": (11, 11),
-    "test_shutdown.py": (2, 2),
+    "test_shutdown.py": (4, 4),
     "test_recompute.py": (8, 8),
     "test_install.py": (2, 0),
     "test_planes.py": (9, 0),

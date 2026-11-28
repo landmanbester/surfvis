@@ -23,9 +23,12 @@ from tests.conftest import needs_web
 # The real serve command, with one route that never finishes in time: what a
 # waterfall read of a large MS looks like to the server.
 SERVE = """
-import sys, time
+import os, signal, sys, time
 from pathlib import Path
 import surfvis.web.app as web
+
+if os.environ.get("TEST_NOHUP"):
+    signal.signal(signal.SIGHUP, signal.SIG_IGN)
 
 real = web.create_app
 
@@ -57,11 +60,11 @@ def _get(url: str, timeout: float) -> int:
         return r.status
 
 
-def _start(chi2_zarr, tmp_path) -> tuple[subprocess.Popen, str]:
+def _start(chi2_zarr, tmp_path, **extra_env) -> tuple[subprocess.Popen, str]:
     ms = str(tmp_path / "serve.ms")
     shutil.copytree(chi2_zarr["ms"]["path"], ms)
     port = _free_port()
-    env = {**os.environ, "PYTHONPATH": os.pathsep.join(sys.path)}
+    env = {**os.environ, "PYTHONPATH": os.pathsep.join(sys.path), **extra_env}
     proc = subprocess.Popen(
         [sys.executable, "-c", SERVE, str(chi2_zarr["zarr"]), ms, str(port)],
         env=env,
@@ -159,7 +162,10 @@ def test_shutdown_finishes_a_flag_write_and_stops_a_recompute(chi2_zarr, tmp_pat
     # A flag write that takes a while.
     real_write = flagging.Flagger._write
 
-    def slow_write(self, *args, **kwargs):
+    in_write = threading.Event()
+
+    def slow_write(self, *args, **kwargs):  # called holding the flag lock
+        in_write.set()
         time.sleep(1.5)
         return real_write(self, *args, **kwargs)
 
@@ -169,11 +175,11 @@ def test_shutdown_finishes_a_flag_write_and_stops_a_recompute(chi2_zarr, tmp_pat
         target=lambda: result.update(r=client.post("/flag", json={**body, "vertices": _rect(6, 8, 2, 20)}))
     )
     writer.start()
-    time.sleep(0.5)  # the write is under way
+    assert in_write.wait(timeout=30)
 
     started = time.monotonic()
-    app.state.shutdown(timeout=30)
-    assert time.monotonic() - started >= 0.5  # it waited for the write
+    app.state.shutdown()
+    assert time.monotonic() - started >= 1.0  # it waited for the write
     writer.join(timeout=5)
     assert result["r"].status_code == 200
     deadline = time.monotonic() + 5
@@ -181,3 +187,49 @@ def test_shutdown_finishes_a_flag_write_and_stops_a_recompute(chi2_zarr, tmp_pat
         assert time.monotonic() < deadline
         time.sleep(0.05)
     assert job["state"] == "failed" and "shutting down" in job["error"] and writes == []
+
+
+@needs_web
+def test_serve_under_nohup_survives_a_hangup(chi2_zarr, tmp_path):
+    """nohup is how one asks a server to outlive the ssh connection: a hangup stays ignored."""
+    proc, base = _start(chi2_zarr, tmp_path, TEST_NOHUP="1")
+    try:
+        os.killpg(proc.pid, signal.SIGHUP)
+        time.sleep(2)
+        assert proc.poll() is None and _get(base + "/flag/state", 5) == 200
+        os.killpg(proc.pid, signal.SIGTERM)
+        assert proc.wait(timeout=30) == 0
+    finally:
+        if proc.poll() is None:
+            os.killpg(proc.pid, signal.SIGKILL)
+            proc.wait()
+
+
+@needs_web
+def test_the_ms_probe_dies_with_the_server(chi2_zarr):
+    """The probe child (flagging._opens) does not outlive a server killed outright."""
+    from surfvis.web import flagging
+
+    slow_probe = flagging._PROBE.replace("import numpy as np", "import time\ntime.sleep(60)\nimport numpy as np", 1)
+    assert slow_probe != flagging._PROBE
+    parent = f"""
+import os, subprocess, sys, time
+child = subprocess.Popen([sys.executable, "-c", {slow_probe!r}, {chi2_zarr["ms"]["path"]!r}, str(os.getpid())])
+time.sleep(1.5)
+print(child.pid, flush=True)
+os._exit(0)
+"""
+    out = subprocess.run([sys.executable, "-c", parent], capture_output=True, text=True, timeout=30, check=True)
+    child = int(out.stdout)
+    deadline = time.monotonic() + 5
+    while os.path.exists(f"/proc/{child}") and _state(child) != "Z":
+        assert time.monotonic() < deadline, "the probe outlived the server"
+        time.sleep(0.1)
+
+
+def _state(pid: int) -> str:
+    try:
+        with open(f"/proc/{pid}/stat") as f:
+            return f.read().rsplit(")", 1)[1].split()[0]
+    except OSError:
+        return "gone"

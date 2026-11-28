@@ -298,7 +298,17 @@ def journal_path(ms: str) -> str | None:
 
 # Run by _opens in a child process.
 _PROBE = """
-import sys
+import os, sys
+
+# Die with the server, however it dies (Linux). Done here, not in a preexec_fn,
+# which is unsafe in the server's threaded process.
+if sys.platform.startswith("linux"):
+    import ctypes
+
+    ctypes.CDLL(None).prctl(1, 9)  # PR_SET_PDEATHSIG, SIGKILL
+    if os.getppid() != int(sys.argv[2]):
+        sys.exit(1)  # the server died before that took effect
+
 import numpy as np
 import arcae
 
@@ -313,14 +323,6 @@ finally:
 """
 
 
-def _die_with_parent() -> None:
-    """In a child, before exec: have Linux kill it when the server dies, however the server dies."""
-    if sys.platform.startswith("linux"):
-        import ctypes
-
-        ctypes.CDLL(None, use_errno=True).prctl(1, 9)  # PR_SET_PDEATHSIG, SIGKILL
-
-
 def _opens(ms: str) -> bool:
     """Whether the MS opens and its FLAG and FLAG_ROW can be read.
 
@@ -332,11 +334,10 @@ def _opens(ms: str) -> bool:
 
     try:
         probe = subprocess.run(
-            [sys.executable, "-c", _PROBE, ms],
+            [sys.executable, "-c", _PROBE, ms, str(os.getpid())],
             capture_output=True,
             timeout=600,
             check=False,
-            preexec_fn=_die_with_parent,
         )
     except subprocess.TimeoutExpired:
         return False

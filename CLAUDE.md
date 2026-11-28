@@ -49,7 +49,7 @@ docker run --rm --user "$(id -u):$(id -g)" -e HOME=/tmp -v "$PWD":/src -w /src \
    PYTHONPATH=/tmp/t:/src/src:/src /tmp/t/bin/pytest tests/ -q -W ignore"
 ```
 
-That is the only way to run the full suite (144 tests; the node one skips in the container). **CI does not run them** —
+That is the only way to run the full suite (146 tests; the node one skips in the container). **CI does not run them** —
 `.github/workflows/ci.yml` installs the lightweight package only, deliberately,
 since python-casacore and numba make CI slow and brittle. Verify locally.
 
@@ -243,7 +243,8 @@ progress finish through `app.state.shutdown`, then `os._exit`s past threads
 still reading: anyio's request workers are not daemons, and the interpreter
 would otherwise wait out a minutes-long MS read. Any new background writer
 must stop or finish inside that shutdown; any new child process must die with
-the server (`flagging._die_with_parent`). `tests/test_shutdown.py` sends each
+the server (`flagging._PROBE` sets `PR_SET_PDEATHSIG` itself; never use a
+`preexec_fn` in this threaded process). Under `nohup` a hangup stays ignored. `tests/test_shutdown.py` sends each
 signal to the real command.
 
 **`serve` carries no `@stimela_cab`** and must not. A long-running GUI is not a

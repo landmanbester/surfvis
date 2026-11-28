@@ -11,9 +11,11 @@ MS keeps a "stopped" server alive for minutes.
 Here every one of those signals starts uvicorn's graceful shutdown, open
 requests get :data:`GRACE` seconds, the app's own shutdown runs (a flag write
 in progress finishes; a recompute stops before it writes), and the process
-then exits without waiting for threads that are only reading. A second
-signal during that exits at once: an interrupted flag write is what the
-journal recovers at the next start.
+then exits without waiting for threads that are only reading. A flag write
+is waited for however long it takes, with a message; a signal during the
+app's shutdown exits at once, and the interrupted write is what the journal
+recovers at the next start. Under ``nohup`` (SIGHUP ignored) a hangup is
+still ignored: surviving the dropped connection is what was asked for.
 """
 
 import os
@@ -40,15 +42,16 @@ def run(app, host: str, port: int) -> None:
 
     def on_signal(sig, frame):
         # uvicorn installs its own handlers for SIGINT and SIGTERM while it
-        # serves and re-raises the signal to this one afterwards; SIGHUP it
-        # leaves alone, so it lands here directly.
-        nonlocal stopping
+        # serves and re-raises the signal here afterwards; SIGHUP it leaves
+        # alone. Either way, and in the moments before uvicorn takes over,
+        # asking it to exit is right (and harmless once it has stopped).
         if stopping:
             _exit(1)
-        if sig == signal.SIGHUP:
-            server.handle_exit(signal.SIGTERM, frame)
+        server.handle_exit(signal.SIGTERM if sig == signal.SIGHUP else sig, frame)
 
     for sig in SIGNALS:
+        if sig == signal.SIGHUP and signal.getsignal(sig) is signal.SIG_IGN:
+            continue  # nohup
         signal.signal(sig, on_signal)
     code = 0
     try:
