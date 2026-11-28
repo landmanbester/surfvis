@@ -158,7 +158,8 @@ add `--rcol DATA --mcol MODEL_DATA --gtable gains.qc/NET` to the command above.
 The waterfall panel can switch product (correlation or Stokes), subtract a
 model column, apply a QuartiCal gain term (`gains.qc/NET`) and overlay a saved
 CASA flag version, or no flags at all (**none**, to see what the mask hides),
-all on the fly. Those controls change the waterfall only;
+all on the fly. The colour scale comes from the current FLAG whichever flags
+are shown, so switching flags never rescales. Those controls change the waterfall only;
 the heatmap is what `chi2` computed, and the panel says when the two differ.
 
 ### 2. Start the server

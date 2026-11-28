@@ -12,6 +12,8 @@ last_verified_commit: 7f526ca
 
 - **web-app.md:** the waterfall's flags menu offers **none**, which hides
   MS flags and keeps FLAG's colour limits.
+- **web-app.md:** one colour scale per plane, from FLAG when first drawn,
+  shared by every flag version, so switching flags never rescales.
 
 ## 2026-11-27 — recomputing stale cells (verified at `2cca15c`)
 

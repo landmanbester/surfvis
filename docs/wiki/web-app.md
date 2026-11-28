@@ -171,9 +171,13 @@ column given by its MSv4 name is translated back, so it is never listed twice.
   **none** (`msdata.NO_FLAGS`, the value `<none>`; angle brackets keep it
   apart from any version name) shows the data with no MS flags, to toggle
   the mask off and see what it hides. Gaps and unusable gains stay flagged.
-  It shares FLAG's colour limits (the canvas route sets them from FLAG if
-  "none" is asked for first), so toggling does not rescale to the RFI
-  underneath; a baseline FLAG covers entirely scales by what "none" shows. Drawing is disabled, as for a saved version.
+  Drawing is disabled, as for a saved version.
+- **The colour scale ignores the flags menu.** It is set once per plane from
+  FLAG as it is when the plane is first drawn (the canvas route reads FLAG
+  for it if a version or "none" is asked for first), and every flag version,
+  "none" and later edits share it, so switching flags shows what changes
+  rather than rescaling. A baseline FLAG covers entirely scales by its data
+  with no flags. `/waterfall.png` (tests only) still scales per request.
 - **The column menu lists complex columns only.** The column is corrected and
   has a model subtracted, which means nothing for `WEIGHT`.
 - **Problems are reported in the panel**, not as a broken image: the
@@ -725,9 +729,10 @@ another quantity, or the same baseline reached from another heatmap, hits the
 cache, and so does a flag edit or another flag version. `invalidate(ms)` clears
 it, for data-column rewrites. An entry holds the plane as complex64 and the flags as
 bool, `values` is dropped: about 9 bytes per cell, so 450 x 32768 is ~130 MB and
-four entries ~0.5 GB. Colour limits are cached per quantity and flag version on
-the entry (`Waterfall.limits`), so colours do not move on zoom or on a flag
-edit (the edit is what changes on screen), and are not recomputed.
+four entries ~0.5 GB. Colour limits are cached per quantity on the entry
+(`Waterfall.limits`), whatever the flag version, so colours do not move on
+zoom, on a flag edit or on a switch of flag version (what changes on screen
+is the flags), and are not recomputed.
 
 Concurrent misses for the same plane (two tabs, a quick double click) wait on
 a per-key lock (`_Coalescer`) for the first read rather than each reading the MS;

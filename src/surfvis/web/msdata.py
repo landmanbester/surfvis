@@ -1006,8 +1006,9 @@ def cached_plane(
     version does not re-read the data columns. ``quantity`` and the chunk
     rectangle are not part of the key. ``plane`` is complex64 and ``values``
     is None, so use ``plane``; ``rect`` is None. ``limits`` is shared by every
-    call with the same flag version, so colours hold still across zooms and
-    flag edits; :data:`NO_FLAGS` shares FLAG's.
+    call on the plane, whatever its flag version, so colours hold still
+    across zooms, flag edits and switches of flag version (the canvas route
+    sets them from FLAG).
 
     Keyed on the baseline as xarray-ms presents it, so the two cells of the
     symmetric heatmap share one entry instead of each reading the MS.
@@ -1029,10 +1030,7 @@ def cached_plane(
             _GENERATIONS.get(ms, 0),
             _gtable_stamp(gtable),
         )
-    wf = _with_flags(ms, field, spw, scan, entry, flagversion)
-    # "none" shares FLAG's colours, so toggling the mask shows what it hides
-    # rather than rescaling to the RFI underneath.
-    return replace(wf, limits=entry.limits.setdefault("" if flagversion == NO_FLAGS else flagversion, {}))
+    return replace(_with_flags(ms, field, spw, scan, entry, flagversion), limits=entry.limits)
 
 
 _PLANES = _Coalescer()

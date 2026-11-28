@@ -210,16 +210,20 @@ def test_a_selection_drawn_over_a_saved_flag_version_is_refused(chi2_zarr, writa
 
 
 @needs_web
-def test_no_flags_keeps_flags_colours(chi2_zarr, writable_ms):
-    """ "none" hides FLAG with FLAG's colours, even asked for first; a baseline FLAG empties scales by itself."""
+def test_colours_come_from_flag_whatever_flags_are_shown(chi2_zarr, writable_ms):
+    """Every flag version and "none" take FLAG's colours, even asked for first, so switching never rescales.
+
+    A baseline FLAG covers entirely scales by its data with no flags at all.
+    """
     pytest.importorskip("httpx2")
     from fastapi.testclient import TestClient
 
     from surfvis.web import msdata, planes
     from surfvis.web.app import create_app
-    from surfvis.web.flagging import Flagger
+    from surfvis.web.flagging import Flagger, save_flag_version
 
     names = chi2_zarr["ms"]["antenna_names"]
+    save_flag_version(writable_ms, "clean", "before any flags")
     flagger = Flagger(writable_ms)
     flagger.apply(0, 0, 1, names[0], names[2], np.array(_rect(0, 5, 0, 20)), corr_idx=[0])
     client = TestClient(create_app(chi2_zarr["zarr"], ms=writable_ms))
@@ -229,18 +233,24 @@ def test_no_flags_keeps_flags_colours(chi2_zarr, writable_ms):
         head, _, flags = planes.decode(client.get(base + query).content)
         return (head["vmin"], head["vmax"]), flags
 
+    clean, clean_flags = get("&flagversion=clean")  # first, so it sets the scale
     bare, bare_flags = get("&flagversion=%3Cnone%3E")
     live, live_flags = get("")
-    assert bare == live and live_flags[0:6, 0:21].all() and not bare_flags[0:6, 0:21].any()
+    assert clean == bare == live
+    assert live_flags[0:6, 0:21].all() and not clean_flags[0:6, 0:21].any() and not bare_flags[0:6, 0:21].any()
     plane = msdata.cached_plane(writable_ms, 0, 0, 1, names[0], names[2], "XX", "RESIDUAL", flagversion="<none>")
-    unmasked = planes.colour_limits(plane.plane, plane.flags, "amp")
-    assert bare != pytest.approx(unmasked)
+    flagged = msdata.cached_plane(writable_ms, 0, 0, 1, names[0], names[2], "XX", "RESIDUAL")
+    assert live == pytest.approx(planes.colour_limits(flagged.plane, flagged.flags, "amp"))
+    assert live != pytest.approx(planes.colour_limits(plane.plane, plane.flags, "amp"))
+    # The scale holds through a later edit too.
+    flagger.apply(0, 0, 1, names[0], names[2], np.array(_rect(6, 8, 0, 31)), corr_idx=[0])
+    assert get("&flagversion=clean")[0] == get("")[0] == live
 
-    # FLAG over the whole baseline leaves nothing to scale by: "none" scales by what it shows.
+    # FLAG over the whole baseline leaves nothing to scale by: the data with no flags does.
     flagger.apply(0, 0, 1, names[0], names[2], np.array(_rect(0, 11, 0, 31)), corr_idx=[0])
-    real, _ = get("&flagversion=%3Cnone%3E&quantity=real")
+    real, _ = get("&flagversion=clean&quantity=real")
     assert real == pytest.approx(planes.colour_limits(plane.plane, plane.flags, "real"))
-    assert real != (0.0, 1.0)
+    assert real != (0.0, 1.0) and get("&quantity=real")[0] == real
 
 
 @needs_web
@@ -452,7 +462,7 @@ def test_a_flag_write_reuses_the_open_scan_and_the_cached_plane(chi2_zarr, writa
     assert flagged.flags[2:4, 5:9].all() and flagged.plane is before.plane
     # Colours hold still across an edit, so the edit is what changes on screen.
     assert flagged.limits is before.limits
-    # "none" hides FLAG, keeps the gaps' flags, and shares FLAG's colours.
+    # "none" hides FLAG, keeps the gaps' flags, and shares the plane's colours.
     bare = plane(flagversion=msdata.NO_FLAGS)
     assert not bare.flags[2:4, 5:9].any() and bare.plane is before.plane and bare.limits is before.limits
     np.testing.assert_array_equal(bare.flags, bare.flags & before.flags)
@@ -462,7 +472,7 @@ def test_a_flag_write_reuses_the_open_scan_and_the_cached_plane(chi2_zarr, writa
     save_flag_version(writable_ms, "edited", "a probe")
     version = plane(flagversion="edited")
     np.testing.assert_array_equal(version.flags, before.flags)
-    assert version.plane is before.plane and version.limits is not before.limits
+    assert version.plane is before.plane and version.limits is before.limits
 
     assert msdata._open_partition.cache_info().misses == opened
     assert len(formed) == 1
