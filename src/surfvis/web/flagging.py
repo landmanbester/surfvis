@@ -649,6 +649,78 @@ def _runs(values: np.ndarray) -> list[tuple[int, int]]:
     return list(zip(starts.tolist(), stops.tolist(), strict=True))
 
 
+class MSLockedError(RuntimeError):
+    """Another process holds a lock on the MS, so a write would wait for it without limit."""
+
+
+# Seconds a write waits for another process to release the MS before refusing.
+LOCK_WAIT = 5.0
+
+
+def lock_holder(ms: str, exclusive: bool = True) -> int | None:
+    """The pid of another process whose casacore lock on ``ms`` stands in the way, or None.
+
+    ``exclusive`` asks on behalf of a write, which any other holder blocks;
+    otherwise on behalf of a read, which only another process's write lock
+    blocks.
+
+    casacore locks a table with fcntl locks on ``table.lock``, and a writer
+    waits for every other holder without limit -- including an idle
+    python-casacore or CASA session that has merely read the table, since
+    auto-locking only gives a lock up while its holder is busy with the
+    table. ``F_GETLK`` asks who would block an exclusive lock without taking
+    one, and never reports this process's own locks. Linux only (the
+    ``struct flock`` layout is platform-specific); elsewhere, None.
+    """
+    import fcntl
+    import struct
+
+    if not sys.platform.startswith("linux"):
+        return None
+    layout = "hhxxxxqqixxxx"  # struct flock on Linux: type, whence, start, len, pid
+    try:
+        fd = os.open(os.path.join(ms, "table.lock"), os.O_RDONLY)
+    except OSError:
+        return None
+    try:
+        probe = struct.pack(layout, fcntl.F_WRLCK if exclusive else fcntl.F_RDLCK, os.SEEK_SET, 0, 0, 0)
+        kind, _, _, _, pid = struct.unpack(layout, fcntl.fcntl(fd, fcntl.F_GETLK, probe))
+    finally:
+        os.close(fd)
+    return None if kind == fcntl.F_UNLCK else pid
+
+
+def _process(pid: int) -> str:
+    """``pid`` and its command line, as far as /proc tells."""
+    try:
+        with open(f"/proc/{pid}/cmdline", "rb") as f:
+            cmd = f.read().replace(b"\0", b" ").decode(errors="replace").strip()
+    except OSError:
+        cmd = ""
+    if len(cmd) > 120:
+        cmd = cmd[:117] + "..."
+    return f"pid {pid}" + (f" ({cmd})" if cmd else "")
+
+
+def wait_unlocked(ms: str, wait: float | None = None, exclusive: bool = True) -> None:
+    """Return once no other process holds a lock on ``ms``; refuse after ``wait`` (:data:`LOCK_WAIT`) seconds.
+
+    A busy reader releases between its reads, so this polls rather than
+    giving up on the first look.
+
+    Raises:
+        MSLockedError: naming the process still holding it.
+    """
+    deadline = time.monotonic() + (LOCK_WAIT if wait is None else wait)
+    while (pid := lock_holder(ms, exclusive)) is not None:
+        if time.monotonic() >= deadline:
+            raise MSLockedError(
+                f"The Measurement Set is locked by another process, {_process(pid)}. "
+                "Close the table there (or wait for it to finish) and try again; nothing was written."
+            )
+        time.sleep(0.1)
+
+
 class BackupPendingError(RuntimeError):
     """Writes wait until the backup flag version is complete."""
 
@@ -842,6 +914,9 @@ class Flagger:
             raise ValueError("No correlations to flag")
         if not dry_run:
             self._require_backup()
+        # Another process's lock would hang the reads below as well as the
+        # write; a dry run only reads, so only a writer stands in its way.
+        wait_unlocked(self.ms, exclusive=not dry_run)
         # A dry run only reads, so it need not wait for (or hold up) a write.
         with contextlib.nullcontext() if dry_run else self._lock:
             ds = msdata._open(self.ms, field_id, spw, scan)
@@ -1009,6 +1084,7 @@ class Flagger:
         rollback, so the log never claims an edit the MS does not hold.
 
         Raises:
+            MSLockedError: if another process holds the MS; nothing was written.
             RuntimeError: if an earlier failure could not be put back.
         """
         import arcae
@@ -1017,6 +1093,9 @@ class Flagger:
 
         if self.broken is not None:
             raise RuntimeError(self.broken)
+        # Before anything is journalled: a write would otherwise wait on
+        # another process's lock without limit, with the request hanging.
+        wait_unlocked(self.ms)
         # Nothing cached holds FLAG, so the write needs no re-open (see msdata.writing).
         with msdata.writing(self.ms):
             table = arcae.table(self.ms, readonly=False)
@@ -1076,7 +1155,9 @@ class Flagger:
 
         Raises:
             StaleUndoError: if ``edit_id`` is not the most recent edit.
+            MSLockedError: if another process holds the MS; nothing was written.
         """
+        wait_unlocked(self.ms)
         with self._lock:
             if not self.edits:
                 return None

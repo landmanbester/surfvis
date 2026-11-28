@@ -256,6 +256,65 @@ def test_colours_come_from_flag_whatever_flags_are_shown(chi2_zarr, writable_ms)
 
 
 @needs_web
+@pytest.mark.parametrize(
+    "holder",
+    [
+        "t = table(ms, ack=False); t.getcol('TIME')",  # an idle session that only read it
+        "t = table(ms, readonly=False, lockoptions='user', ack=False); t.lock(write=True)",  # a flagger
+    ],
+    ids=["idle-reader", "writer"],
+)
+def test_a_locked_ms_is_refused_not_waited_on(chi2_zarr, writable_ms, monkeypatch, holder):
+    """Another process holding the MS gets a prompt 409 naming it, and nothing is written or logged."""
+    import subprocess
+    import sys
+    import time
+
+    pytest.importorskip("httpx2")
+    from fastapi.testclient import TestClient
+
+    from surfvis.web import flagging
+    from surfvis.web.app import create_app
+
+    monkeypatch.setattr(flagging, "LOCK_WAIT", 1.0)
+    client = TestClient(create_app(chi2_zarr["zarr"], ms=writable_ms, allow_flagging=True, warm=False))
+    _wait_for_backup(client)
+    body = {"field": 0, "spw": 0, "scan": 1, "p": 0, "q": 2, "product": "XX", "vertices": _rect(1, 2, 4, 9)}
+    edit = client.post("/flag", json=body).json()  # one to undo
+    before, _ = _flags(writable_ms)
+    logged = len(flagging.read_log(writable_ms))
+
+    script = "\n".join(
+        ["from casacore.tables import table", "import time", f"ms = {writable_ms!r}", holder]
+        + ["print('held', flush=True)", "time.sleep(60)"]
+    )
+    proc = subprocess.Popen(
+        [sys.executable, "-c", script], stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True
+    )
+    try:
+        assert proc.stdout.readline().strip() == "held"
+        assert flagging.lock_holder(writable_ms) == proc.pid
+        started = time.monotonic()
+        r = client.post("/flag", json={**body, "vertices": _rect(6, 8, 4, 9)})
+        assert time.monotonic() - started < 10
+        assert r.status_code == 409 and f"pid {proc.pid}" in r.json()["detail"]
+        # A dry run only reads: an idle reader is no obstacle, a writer is.
+        dry = client.post("/flag", json={**body, "vertices": _rect(6, 8, 4, 9), "dry_run": True})
+        assert dry.status_code == (409 if "lock(write=True)" in holder else 200)
+        u = client.post("/flag/undo", json={"id": edit["id"]})
+        assert u.status_code == 409 and "locked by another process" in u.json()["detail"]
+        assert len(flagging.read_log(writable_ms)) == logged
+        assert not os.path.exists(os.path.join(f"{writable_ms}.flagversions", flagging.JOURNAL))
+    finally:
+        proc.kill()
+        proc.wait()
+    np.testing.assert_array_equal(_flags(writable_ms)[0], before)  # read here: the writer would block it
+    # Once it lets go, the same requests go through.
+    assert flagging.lock_holder(writable_ms) is None
+    assert client.post("/flag/undo", json={"id": edit["id"]}).status_code == 200
+
+
+@needs_web
 def test_product_correlations_follow_full_jones_gains(chi2_zarr, writable_ms, tmp_path):
     """Corrected XX with full-Jones gains is formed from all four correlations, so all four are flagged."""
     pytest.importorskip("httpx2")

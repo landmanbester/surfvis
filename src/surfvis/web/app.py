@@ -18,7 +18,7 @@ from pydantic import BaseModel, Field
 
 from surfvis.utils import gains as gains_mod
 from surfvis.web import flagging, msdata, planes, profiling, recompute, render
-from surfvis.web.flagging import BackupPendingError, Flagger, StaleUndoError
+from surfvis.web.flagging import BackupPendingError, Flagger, MSLockedError, StaleUndoError
 from surfvis.web.store import Chi2Store, Selection
 
 HERE = Path(__file__).parent
@@ -640,6 +640,8 @@ def create_app(
             return {**result, "correlations": [labels[i] for i in corr_idx]}
         except BackupPendingError as exc:
             raise HTTPException(status_code=503, detail=str(exc), headers={"Retry-After": "10"}) from exc
+        except MSLockedError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
         except (KeyError, IndexError, FileNotFoundError) as exc:
             raise HTTPException(status_code=404, detail=str(exc)) from exc
         except ValueError as exc:
@@ -652,7 +654,7 @@ def create_app(
         """Restore the cells the named edit changed, if it is still the most recent."""
         try:
             edit = _flagger().undo(req.id)
-        except StaleUndoError as exc:
+        except (StaleUndoError, MSLockedError) as exc:
             raise HTTPException(status_code=409, detail=str(exc)) from exc
         if edit is None:
             raise HTTPException(status_code=409, detail="Nothing to undo")
