@@ -3,10 +3,21 @@ type: log
 title: Wiki changelog
 description: Chronological record of what changed in the wiki and why.
 timestamp: 2026-11-28
-last_verified_commit: 7f526ca
+last_verified_commit: 1c29b94
 ---
 
 # Wiki changelog
+
+## 2026-11-28 — flagging complete, docs brought up to date (verified at `1c29b94`)
+
+- **web-app.md:** the lock check (`wait_unlocked`, 409 naming the holder);
+  issue #16 marked implemented in full.
+- **index.md:** web-app.md's coverage now lists flagging, shutdown,
+  profiling and the canvas waterfall.
+- **chi2-pipeline.md:** the `created` attr and the recompute that must
+  follow chi2's recipe.
+- Removed `docs/superpowers/` (the canvas-waterfall spec and plan): specs
+  are not retained, and web-app.md covers what was built.
 
 ## 2026-11-28 — stopping serve cleanly (verified at `c84ad30`)
 

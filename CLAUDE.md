@@ -305,8 +305,8 @@ over the fork+threads architecture that this migration removes: numba atomics
 would let the chi-squared kernel accumulate into one shared matrix, deleting the
 process pool, the pickling and the parent reduction together.
 
-**Manual flagging** from the waterfall is designed in issue #16 and is being
-built on the `flagging` branch, stacked on `serve-ui`. The write path is
+**Manual flagging** from the waterfall (issue #16) is implemented; see
+`docs/wiki/web-app.md` "Manual flagging". The write path is
 `web/flagging.py`: selections are polygons in (time slot, channel), rasterised
 on the server by cell centre and even-odd; writes need `serve
 --allow-flagging`, save FLAG as a CASA flag version before the first write, and
@@ -321,12 +321,19 @@ selection's channel range, written in row chunks, never as cell indices.
 Every edit, undo and rollback goes into the audit log
 (`<ms>.flagversions/surfvis_flags.jsonl`), written before the journal is
 retired, and the heatmap derives its stale markers from it
-(`flagging.outstanding`, `static/stale.mjs`) against the zarr's `created`.
-Staleness is per cell (the zarr's `computed` times). `web/recompute.py`
+(`flagging.stale_cells`, `static/stale.mjs`). Staleness is per cell (the
+zarr's `computed` times, else its `created` attr). `web/recompute.py`
 recomputes stale cells by chi2's recipe -- FLAG only, rows as stored -- and
 `Chi2Store.write_cells` is the one write path to the zarr; a test pins
 agreement with `chi2` to 1e-9, so change both together. Any new write to
-the MS goes through `Flagger`.
+the MS goes through `Flagger`, and so checks `flagging.wait_unlocked` first:
+casacore would otherwise wait without limit on any other process's lock, even
+an idle reader's, and the request would hang.
+
+**The waterfall's colour scale ignores the flags menu.** It is set once per
+plane from FLAG when first drawn and kept in `msdata._LIMITS`, outside the
+plane LRU, so switching flag versions (or "none", `msdata.NO_FLAGS`), editing
+flags or evicting the plane never rescales it.
 
 ## Agent skills
 

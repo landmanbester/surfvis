@@ -247,6 +247,12 @@ remote host, then forward it to your laptop exactly as above.
 If port 8000 is already taken, pick another and keep both sides consistent:
 `--port 8042` with `-L 8042:localhost:8042`.
 
+**Stopping it.** Ctrl-C, `kill`, or a dropped ssh connection all stop the
+server within a few seconds and leave no process behind. A flag write in
+progress is finished first (signal again to abandon it; the next start rolls
+it back). To keep the server running after you disconnect, start it under
+`tmux`, `screen` or `nohup`; under `nohup` a hangup is ignored.
+
 ### Using the interface
 
 **Save as PNG** (top right) saves the whole page, including whatever is
@@ -312,6 +318,61 @@ noise?" -- but dropping the model tells you whether the problem is in the data
 or in the model subtracted from it. Anything you change carries over as you
 click from baseline to baseline. Once the settings no longer match the heatmap,
 the panel says so.
+
+### Flagging by hand
+
+`surfvis serve` is read-only unless started with `--allow-flagging`. With it,
+you can flag by hand on a baseline's waterfall
+([#16](https://github.com/ratt-ru/surfvis/issues/16)):
+
+| Do | To |
+|---|---|
+| drag | select a rectangle of cells |
+| click, click, click... | draw a polygon; click its first vertex, double-click or press Enter to close it |
+| Backspace / Esc | drop the last vertex / cancel |
+| Enter, or the Flag button | flag the pending selection, after reading how many new cells it covers |
+| Ctrl/Cmd-Z, or the Undo button | undo the latest edit, which the button names |
+
+A closed selection is only shaded and counted; nothing is written until you
+confirm it. "All correlations" (on by default) flags every correlation of the
+baseline; untick it to flag only those the plotted product is formed from.
+"Baselines" widens a selection to every baseline of one of the panel's
+antennas (its auto-correlation included) or to every baseline in the scan;
+it resets to "this one" on every new panel, and the Flag button says how
+many baselines it will touch. Whatever its scope, one selection is one edit
+and one undo. A
+pending selection follows you to the next baseline of the same scan, so one
+patch of RFI can be flagged across baselines with the arrow keys and Enter.
+Drawing is disabled while the flags menu shows a saved flag version or none. Before
+its first write, a flagging session saves FLAG as a CASA flag version named
+`surfvis_before_<UTC timestamp>`, so `flagmanager` (or the flags menu) can
+restore it.
+
+Every edit, undo and rollback is appended to an audit log,
+`<ms>.flagversions/surfvis_flags.jsonl`: one JSON line saying when, who,
+where, the scope, the polygon (in slots and channels, and as UTC times and
+frequencies) and how many cells changed. The heatmap reads it: in a scan
+with edits newer than its `chi2` run, the header says so and the cells
+those edits touched get a corner mark. With `--allow-flagging` the note
+offers **Recompute N stale cells**: `serve` forms those cells' χ² again from
+the MS, exactly as `chi2` did (same columns, model, gains, products and
+weights), and writes them into the `chi2` output in the background. The
+header then says how many cells `serve` has recomputed. The per-chunk PNGs
+in `--imagesout` are left as `chi2` wrote them.
+
+A crash, `kill -9` or power cut in the middle of a write cannot leave the MS
+unopenable or an edit half-applied. Every write is journalled in
+`<ms>.flagversions/surfvis_journal/` first, and the next `surfvis serve
+--allow-flagging` on that MS rolls the interrupted edit back, restoring any
+storage-manager header the interruption broke, before it does anything else.
+Started without `--allow-flagging`, it warns that a journal is waiting. Leave
+the journal alone; it is deleted once it has been applied.
+
+If another program has the MS open -- CASA, a flagger, even an idle Python
+session that has read it -- casacore would make a write wait for it
+indefinitely. Instead `serve` waits a few seconds, then refuses the flag or
+undo, saying which process holds the MS; close the table there and try
+again. Nothing is written in the meantime.
 
 ### A note on column names (MSv2 vs MSv4)
 
@@ -384,52 +445,8 @@ select a compatible subset.
 `surfvis flag-chi2` writes to the flag column of the MS you give it. There is
 no dry-run.
 
-`surfvis serve` is read-only unless started with `--allow-flagging`. With it,
-you can flag by hand on a baseline's waterfall
-([#16](https://github.com/ratt-ru/surfvis/issues/16)):
-
-| Do | To |
-|---|---|
-| drag | select a rectangle of cells |
-| click, click, click... | draw a polygon; click its first vertex, double-click or press Enter to close it |
-| Backspace / Esc | drop the last vertex / cancel |
-| Enter, or the Flag button | flag the pending selection, after reading how many new cells it covers |
-| Ctrl/Cmd-Z, or the Undo button | undo the latest edit, which the button names |
-
-A closed selection is only shaded and counted; nothing is written until you
-confirm it. "All correlations" (on by default) flags every correlation of the
-baseline; untick it to flag only those the plotted product is formed from.
-"Baselines" widens a selection to every baseline of one of the panel's
-antennas (its auto-correlation included) or to every baseline in the scan;
-it resets to "this one" on every new panel, and the Flag button says how
-many baselines it will touch. Whatever its scope, one selection is one edit
-and one undo. A
-pending selection follows you to the next baseline of the same scan, so one
-patch of RFI can be flagged across baselines with the arrow keys and Enter.
-Drawing is disabled while the flags menu shows a saved flag version or none. Before
-its first write, a flagging session saves FLAG as a CASA flag version named
-`surfvis_before_<UTC timestamp>`, so `flagmanager` (or the flags menu) can
-restore it.
-
-Every edit, undo and rollback is appended to an audit log,
-`<ms>.flagversions/surfvis_flags.jsonl`: one JSON line saying when, who,
-where, the scope, the polygon (in slots and channels, and as UTC times and
-frequencies) and how many cells changed. The heatmap reads it: in a scan
-with edits newer than its `chi2` run, the header says so and the cells
-those edits touched get a corner mark. With `--allow-flagging` the note
-offers **Recompute N stale cells**: `serve` forms those cells' χ² again from
-the MS, exactly as `chi2` did (same columns, model, gains, products and
-weights), and writes them into the `chi2` output in the background. The
-header then says how many cells `serve` has recomputed. The per-chunk PNGs
-in `--imagesout` are left as `chi2` wrote them.
-
-A crash, `kill -9` or power cut in the middle of a write cannot leave the MS
-unopenable or an edit half-applied. Every write is journalled in
-`<ms>.flagversions/surfvis_journal/` first, and the next `surfvis serve
---allow-flagging` on that MS rolls the interrupted edit back, restoring any
-storage-manager header the interruption broke, before it does anything else.
-Started without `--allow-flagging`, it warns that a journal is waiting. Leave
-the journal alone; it is deleted once it has been applied.
+`surfvis serve --allow-flagging` writes FLAG; see
+[Flagging by hand](#flagging-by-hand) for what protects the MS.
 
 ## Development
 

@@ -4,7 +4,7 @@ title: Chi-squared browser
 description: How surfvis serve links surfchi2 output to on-demand baseline waterfalls, the waterfall's correction / Stokes / flag-version controls, and the xarray-ms facts it depends on.
 tags: [web, fastapi, htmx, xarray-ms, zarr]
 timestamp: 2026-11-28
-last_verified_commit: c84ad30
+last_verified_commit: 1c29b94
 ---
 
 # Chi-squared browser
@@ -308,7 +308,7 @@ The selected cell keeps an outline (`.selected`) across heatmap re-renders.
 
 ## Manual flagging (write path)
 
-Design: issue #16. Source: `web/flagging.py`, the `/flag*` routes in `app.py`,
+Design: issue #16, implemented in full (steps 1-5). Source: `web/flagging.py`, the `/flag*` routes in `app.py`,
 and the selection tool in `static/wf/` (see "Selection on the canvas"). Terms
 (selection, pending selection, edit, scope, backup) are in `GLOSSARY.md`.
 
@@ -420,6 +420,20 @@ and the selection tool in `static/wf/` (see "Selection on the canvas"). Terms
   recovery at once; if that fails too, `Flagger.broken` is set and writes are
   refused until a restart. 25 random `kill -9`s during a stream of edits (7
   of them mid-write) left every MS openable and no edit half-applied.
+- **Another process's lock is refused, not waited on.** casacore makes a
+  writer wait without limit for every other holder of `table.lock` --
+  including an idle python-casacore or CASA session that merely read the MS,
+  since auto-locking gives a lock up only while its holder is busy with the
+  table (all of arcae's `lockoptions` behave the same). A foreign *write*
+  lock blocks reads too. So `Flagger.apply` (dry runs included), `undo` and
+  `_write` first call `wait_unlocked`: `lock_holder` asks the kernel
+  (`F_GETLK`, Linux `struct flock`) which other process would block an
+  exclusive lock (a shared one for a dry run), never reporting this
+  process's own; it polls for `LOCK_WAIT` (5 s) so a busy reader can let go,
+  then raises `MSLockedError` naming the pid and its command line, which the
+  routes return as 409 for the panel to show. Nothing is journalled, written
+  or logged. A lock taken between the check and the write still waits.
+  Waterfall reads do not check: under a foreign write lock they wait.
 - **Audit log.** Every apply, undo and recovery rollback appends one JSON
   line to `<ms>.flagversions/surfvis_flags.jsonl` (fsynced), so a session's
   manual flags can be reviewed or replayed. An apply records time, user@host,

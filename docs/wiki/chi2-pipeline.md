@@ -3,8 +3,8 @@ type: reference
 title: Chi-squared pipeline
 description: How chi2 and flag-chi2 chunk a Measurement Set, what the numba kernels compute, how results are reduced, and where images land.
 tags: [chi2, flagging, dask, numba, daskms]
-timestamp: 2026-11-05
-last_verified_commit: 00cccac
+timestamp: 2026-11-28
+last_verified_commit: 1c29b94
 ---
 
 # Chi-squared pipeline
@@ -90,7 +90,12 @@ gains have been validated, so a run that was going to fail leaves the previous
 outputs alone. A path that exists and holds anything other than `field<N>`
 directories (plus zarr metadata, for `--dataout`) is refused before any work:
 `--dataout .` or a mistyped MS must not be removed. `--dataout` writes the zarr
-`surfvis serve` reads; see [web-app.md](web-app.md) for the layout.
+`surfvis serve` reads; see [web-app.md](web-app.md) for the layout. Each group
+records `created`, the unix time taken *before* the first read: `serve` marks a
+cell stale when a manual flag edit is newer, and its recompute follows this
+module's recipe exactly (same columns, model, gains, products, float32
+`1/σ²` for `SIGMA_SPECTRUM`), pinned by a test to 1e-9 -- change both
+together.
 
 A weight that is not positive and finite is treated as flagged by
 `products.form`, before correction. A zero-weight unflagged visibility used to
