@@ -176,7 +176,10 @@ column given by its MSv4 name is translated back, so it is never listed twice.
   FLAG as it is when the plane is first drawn (the canvas route reads FLAG
   for it if a version or "none" is asked for first), and every flag version,
   "none" and later edits share it, so switching flags shows what changes
-  rather than rescaling. A baseline FLAG covers entirely scales by its data
+  rather than rescaling. The limits live in `msdata._LIMITS`, outside the
+  four-entry plane LRU, so a plane evicted and read again after an edit keeps
+  its first scale; only a data rewrite (`invalidate`, a new MS generation or a
+  re-solved gain table) starts a new one. A baseline FLAG covers entirely scales by its data
   with no flags. `/waterfall.png` (tests only) still scales per request.
 - **The column menu lists complex columns only.** The column is corrected and
   has a model subtracted, which means nothing for `WEIGHT`.
@@ -729,8 +732,9 @@ another quantity, or the same baseline reached from another heatmap, hits the
 cache, and so does a flag edit or another flag version. `invalidate(ms)` clears
 it, for data-column rewrites. An entry holds the plane as complex64 and the flags as
 bool, `values` is dropped: about 9 bytes per cell, so 450 x 32768 is ~130 MB and
-four entries ~0.5 GB. Colour limits are cached per quantity on the entry
-(`Waterfall.limits`), whatever the flag version, so colours do not move on
+four entries ~0.5 GB. Colour limits are cached per quantity and plane in `_LIMITS`
+(handed out as `Waterfall.limits`), whatever the flag version and beyond the
+entry's eviction, so colours do not move on
 zoom, on a flag edit or on a switch of flag version (what changes on screen
 is the flags), and are not recomputed.
 

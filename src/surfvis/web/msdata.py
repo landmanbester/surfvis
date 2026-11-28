@@ -634,6 +634,7 @@ def invalidate(ms: str) -> None:
         _FINGERPRINTS.pop(ms, None)
     _open_partition.cache_clear()
     _cached_plane.cache_clear()
+    _LIMITS.clear()
     _release_cached_tables()
     # Not _query_scan_rows: a FLAG write leaves the row layout alone, and
     # _layout_stamp catches anything that does not.
@@ -1006,34 +1007,31 @@ def cached_plane(
     version does not re-read the data columns. ``quantity`` and the chunk
     rectangle are not part of the key. ``plane`` is complex64 and ``values``
     is None, so use ``plane``; ``rect`` is None. ``limits`` is shared by every
-    call on the plane, whatever its flag version, so colours hold still
-    across zooms, flag edits and switches of flag version (the canvas route
-    sets them from FLAG).
+    call on the plane, whatever its flag version, and outlives the plane's
+    cache entry (``_LIMITS``), so colours hold still across zooms, flag
+    edits, switches of flag version and eviction (the canvas route sets them
+    from FLAG).
 
     Keyed on the baseline as xarray-ms presents it, so the two cells of the
     symmetric heatmap share one entry instead of each reading the MS.
     """
     name1, name2 = view_order(_open(ms, field, spw, scan), name1, name2)
     key = (ms, field, spw, scan, name1, name2, product, column, model, gtable)
+    stamp = (_GENERATIONS.get(ms, 0), _gtable_stamp(gtable))
     with _PLANES.hold(key, "cached_plane"):
-        entry = _cached_plane(
-            ms,
-            field,
-            spw,
-            scan,
-            name1,
-            name2,
-            product,
-            column,
-            model,
-            gtable,
-            _GENERATIONS.get(ms, 0),
-            _gtable_stamp(gtable),
-        )
-    return replace(_with_flags(ms, field, spw, scan, entry, flagversion), limits=entry.limits)
+        entry = _cached_plane(ms, field, spw, scan, name1, name2, product, column, model, gtable, *stamp)
+    limits = _LIMITS.setdefault(key + stamp, {})
+    return replace(_with_flags(ms, field, spw, scan, entry, flagversion), limits=limits)
 
 
 _PLANES = _Coalescer()
+
+# Colour limits per plane (cached_plane's key plus the data's stamp), kept
+# outside the plane LRU: an evicted plane read again must keep the scale it
+# was first drawn with, not take one from FLAG as edited since. A few floats
+# per plane ever drawn; cleared by invalidate(), whose data rewrite is a new
+# picture anyway.
+_LIMITS: dict[tuple, dict] = {}
 
 
 @lru_cache(maxsize=4)

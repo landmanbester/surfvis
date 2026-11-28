@@ -242,9 +242,11 @@ def test_colours_come_from_flag_whatever_flags_are_shown(chi2_zarr, writable_ms)
     flagged = msdata.cached_plane(writable_ms, 0, 0, 1, names[0], names[2], "XX", "RESIDUAL")
     assert live == pytest.approx(planes.colour_limits(flagged.plane, flagged.flags, "amp"))
     assert live != pytest.approx(planes.colour_limits(plane.plane, plane.flags, "amp"))
-    # The scale holds through a later edit too.
+    # The scale holds through a later edit, and through the plane being evicted and read again.
     flagger.apply(0, 0, 1, names[0], names[2], np.array(_rect(6, 8, 0, 31)), corr_idx=[0])
     assert get("&flagversion=clean")[0] == get("")[0] == live
+    msdata._cached_plane.cache_clear()
+    assert get("&flagversion=clean")[0] == live
 
     # FLAG over the whole baseline leaves nothing to scale by: the data with no flags does.
     flagger.apply(0, 0, 1, names[0], names[2], np.array(_rect(0, 11, 0, 31)), corr_idx=[0])
