@@ -660,53 +660,64 @@ LOCK_WAIT = 5.0
 def lock_holder(ms: str, exclusive: bool = True) -> int | None:
     """The pid of another process whose casacore lock on ``ms`` stands in the way, or None.
 
-    ``exclusive`` asks on behalf of a write, which any other holder blocks;
-    otherwise on behalf of a read, which only another process's write lock
-    blocks.
+    ``exclusive`` asks on behalf of a write, which any other holder of the
+    table lock blocks; otherwise on behalf of a read, which only another
+    process's write lock blocks.
 
-    casacore locks a table with fcntl locks on ``table.lock``, and a writer
-    waits for every other holder without limit -- including an idle
-    python-casacore or CASA session that has merely read the table, since
-    auto-locking only gives a lock up while its holder is busy with the
-    table. ``F_GETLK`` asks who would block an exclusive lock without taking
-    one, and never reports this process's own locks. Linux only (the
-    ``struct flock`` layout is platform-specific); elsewhere, None.
+    casacore locks a table with fcntl locks on ``table.lock``. Byte 0 is the
+    table lock itself, which a writer waits for without limit -- including
+    from an idle python-casacore or CASA session that has merely read the
+    table, since auto-locking hands a lock over only when the waiting
+    process registers a request in the file. Byte 1 is held (shared) by
+    every process that merely has the table open, arcae and xarray-ms
+    included; it blocks nothing, so it must not be probed. ``F_GETLK`` asks
+    who would block a lock on byte 0 without taking one, and never reports
+    this process's own locks. Linux only (the ``struct flock`` layout is
+    platform-specific); elsewhere, and where the filesystem does not do
+    fcntl locks (NFS without lockd, Lustre without flock), None: casacore
+    is then without locks too, and nothing would wait.
     """
     import fcntl
     import struct
 
     if not sys.platform.startswith("linux"):
         return None
-    layout = "hhxxxxqqixxxx"  # struct flock on Linux: type, whence, start, len, pid
+    layout = "hhxxxxqqixxxx"  # struct flock on 64-bit Linux: type, whence, start, len, pid
     try:
         fd = os.open(os.path.join(ms, "table.lock"), os.O_RDONLY)
     except OSError:
         return None
     try:
-        probe = struct.pack(layout, fcntl.F_WRLCK if exclusive else fcntl.F_RDLCK, os.SEEK_SET, 0, 0, 0)
+        probe = struct.pack(layout, fcntl.F_WRLCK if exclusive else fcntl.F_RDLCK, os.SEEK_SET, 0, 1, 0)
         kind, _, _, _, pid = struct.unpack(layout, fcntl.fcntl(fd, fcntl.F_GETLK, probe))
+    except OSError:  # ENOLCK, ENOSYS, EINVAL: no fcntl locking here
+        return None
     finally:
         os.close(fd)
     return None if kind == fcntl.F_UNLCK else pid
 
 
 def _process(pid: int) -> str:
-    """``pid`` and its command line, as far as /proc tells."""
+    """``pid`` and its command line, as far as /proc tells; a lock held from elsewhere has neither."""
     try:
         with open(f"/proc/{pid}/cmdline", "rb") as f:
             cmd = f.read().replace(b"\0", b" ").decode(errors="replace").strip()
     except OSError:
         cmd = ""
+    if pid <= 0 or not cmd:
+        # NFS reports a remote owner, another pid namespace reports 0.
+        return "another process, possibly on another host or in a container"
     if len(cmd) > 120:
         cmd = cmd[:117] + "..."
-    return f"pid {pid}" + (f" ({cmd})" if cmd else "")
+    return f"pid {pid} ({cmd})"
 
 
 def wait_unlocked(ms: str, wait: float | None = None, exclusive: bool = True) -> None:
     """Return once no other process holds a lock on ``ms``; refuse after ``wait`` (:data:`LOCK_WAIT`) seconds.
 
-    A busy reader releases between its reads, so this polls rather than
-    giving up on the first look.
+    Polls rather than giving up on the first look, for holders that are
+    about to finish (casacore hands a lock over only on a registered
+    request, which this does not make).
 
     Raises:
         MSLockedError: naming the process still holding it.

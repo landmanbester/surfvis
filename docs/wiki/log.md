@@ -10,7 +10,8 @@ last_verified_commit: 1c29b94
 
 ## 2026-11-28 — flagging complete, docs brought up to date (verified at `1c29b94`)
 
-- **web-app.md:** the lock check (`wait_unlocked`, 409 naming the holder);
+- **web-app.md:** the lock check (`wait_unlocked`, 409 naming the holder;
+  byte 0 only, since every open table holds byte 1);
   issue #16 marked implemented in full.
 - **index.md:** web-app.md's coverage now lists flagging, shutdown,
   profiling and the canvas waterfall.

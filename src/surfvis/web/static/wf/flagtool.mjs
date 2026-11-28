@@ -183,9 +183,11 @@ export function attach(root, api) {
     busy = true;
     refreshButtons();
     const edit = latest;
+    let undone = false;
     say("Undoing…");
     try {
       await postJSON("/flag/undo", { id: edit.id });
+      undone = true;
       say(`Undid ${edit.description}.`);
       document.dispatchEvent(new CustomEvent("surfvis:flagged"));
       if (sameBaseline(edit, ctx, name1, name2)) await api.reload();
@@ -194,8 +196,9 @@ export function attach(root, api) {
     } finally {
       busy = false;
       await loadState();
-      // The undo may have unflagged cells a pending selection covers: count again.
-      if (sel.mode === "pending") onPending();
+      // The undo may have unflagged cells a pending selection covers: count
+      // again. Not after a failure, whose message the count would replace.
+      if (undone && sel.mode === "pending") onPending();
     }
   }
 

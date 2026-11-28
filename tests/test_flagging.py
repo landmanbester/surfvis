@@ -315,6 +315,45 @@ def test_a_locked_ms_is_refused_not_waited_on(chi2_zarr, writable_ms, monkeypatc
 
 
 @needs_web
+@pytest.mark.parametrize(
+    "holder",
+    [
+        "import arcae\nt = arcae.table(ms); t.getcol('TIME')",  # arcae / xarray-ms / another serve
+        "from casacore.tables import table\nt = table(ms, lockoptions='user', ack=False)",  # opened, not read
+        "from casacore.tables import table\nt = table(ms, ack=False); t.getcol('TIME'); t.unlock()",
+    ],
+    ids=["arcae-open", "casacore-user-opened", "casacore-auto-unlocked"],
+)
+def test_a_process_that_only_has_the_ms_open_does_not_block_flagging(chi2_zarr, writable_ms, holder):
+    """Having the table open holds casacore's 'open' lock, which blocks nothing: flag and undo go through."""
+    import subprocess
+    import sys
+
+    pytest.importorskip("httpx2")
+    from fastapi.testclient import TestClient
+
+    from surfvis.web import flagging
+    from surfvis.web.app import create_app
+
+    client = TestClient(create_app(chi2_zarr["zarr"], ms=writable_ms, allow_flagging=True, warm=False))
+    _wait_for_backup(client)
+    script = "\n".join(["import time", f"ms = {writable_ms!r}", holder, "print('held', flush=True)", "time.sleep(60)"])
+    proc = subprocess.Popen(
+        [sys.executable, "-c", script], stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True
+    )
+    try:
+        assert proc.stdout.readline().strip() == "held"
+        assert flagging.lock_holder(writable_ms) is None
+        body = {"field": 0, "spw": 0, "scan": 1, "p": 0, "q": 2, "product": "XX", "vertices": _rect(1, 2, 4, 9)}
+        edit = client.post("/flag", json=body)
+        assert edit.status_code == 200, edit.text
+        assert client.post("/flag/undo", json={"id": edit.json()["id"]}).status_code == 200
+    finally:
+        proc.kill()
+        proc.wait()
+
+
+@needs_web
 def test_product_correlations_follow_full_jones_gains(chi2_zarr, writable_ms, tmp_path):
     """Corrected XX with full-Jones gains is formed from all four correlations, so all four are flagged."""
     pytest.importorskip("httpx2")

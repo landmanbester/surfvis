@@ -49,7 +49,7 @@ docker run --rm --user "$(id -u):$(id -g)" -e HOME=/tmp -v "$PWD":/src -w /src \
    PYTHONPATH=/tmp/t:/src/src:/src /tmp/t/bin/pytest tests/ -q -W ignore"
 ```
 
-That is the only way to run the full suite (148 tests; the node one skips in the container). **CI does not run them** —
+That is the only way to run the full suite (151 tests; the node one skips in the container). **CI does not run them** —
 `.github/workflows/ci.yml` installs the lightweight package only, deliberately,
 since python-casacore and numba make CI slow and brittle. Verify locally.
 
@@ -327,8 +327,10 @@ recomputes stale cells by chi2's recipe -- FLAG only, rows as stored -- and
 `Chi2Store.write_cells` is the one write path to the zarr; a test pins
 agreement with `chi2` to 1e-9, so change both together. Any new write to
 the MS goes through `Flagger`, and so checks `flagging.wait_unlocked` first:
-casacore would otherwise wait without limit on any other process's lock, even
-an idle reader's, and the request would hang.
+casacore would otherwise wait without limit on any other process's table lock,
+even an idle reader's, and the request would hang. Probe byte 0 of
+`table.lock` only: every process with the table open holds byte 1, which
+blocks nothing.
 
 **The waterfall's colour scale ignores the flags menu.** It is set once per
 plane from FLAG when first drawn and kept in `msdata._LIMITS`, outside the
