@@ -30,6 +30,7 @@ def make_ms(
     hot: tuple[int, int] | None = (1, 5),
     hot_scale: float = 25.0,
     seed: int = 42,
+    autos: bool = False,
 ) -> dict:
     """Write a Measurement Set with a known bad baseline.
 
@@ -43,6 +44,9 @@ def make_ms(
         hot: ``(p, q)`` antenna pair whose residuals are inflated, or None.
         hot_scale: Factor applied to the hot baseline's residuals.
         seed: RNG seed.
+        autos: Also write each antenna's auto-correlation, as interferometers
+            usually do (after the cross-correlations, so baselines keep
+            their row positions within a time slot otherwise).
 
     Returns:
         A dict describing what was written, including the hot baseline.
@@ -51,6 +55,8 @@ def make_ms(
 
     rng = np.random.default_rng(seed)
     baselines = [(p, q) for p in range(nant) for q in range(p + 1, nant)]
+    if autos:
+        baselines += [(p, p) for p in range(nant)]
     nbl = len(baselines)
     nrow = nbl * ntime * nscan
 
@@ -183,8 +189,12 @@ def make_ms(
     }
 
 
-def write_gain_table(info: dict, path: str, term: str = "NET") -> str:
+def write_gain_table(info: dict, path: str, term: str = "NET", full: bool = False) -> str:
     """Write ``info["gains"]`` the way QuartiCal lays out a gain term.
+
+    ``full`` writes a full-Jones term instead: the same diagonal with zero
+    off-diagonals, so it corrects identically but mixes all four
+    correlations.
 
     One zarr group per (field, spw, scan) -- ``<path>/<term>/<term>_<n>`` --
     holding ``gains`` ``(gain_time, gain_freq, antenna, direction,
@@ -199,6 +209,11 @@ def write_gain_table(info: dict, path: str, term: str = "NET") -> str:
     for n in range(nscan):
         sl = slice(n * ntime, (n + 1) * ntime)
         g = info["gains"][sl][:, :, :, None, :]
+        corrs = ["XX", "YY"]
+        if full:
+            zero = np.zeros_like(g[..., :1])
+            g = np.concatenate([g[..., :1], zero, zero, g[..., 1:]], axis=-1)
+            corrs = ["XX", "XY", "YX", "YY"]
         ds = xr.Dataset(
             {
                 "gains": (("gain_time", "gain_freq", "antenna", "direction", "correlation"), g),
@@ -209,7 +224,7 @@ def write_gain_table(info: dict, path: str, term: str = "NET") -> str:
                 "gain_freq": info["freqs"],
                 "antenna": info["antenna_names"],
                 "direction": [0],
-                "correlation": ["XX", "YY"],
+                "correlation": corrs,
             },
             attrs={"FIELD_ID": 0, "DATA_DESC_ID": 0, "SCAN_NUMBER": n + 1, "TYPE": "complex"},
         )

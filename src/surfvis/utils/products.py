@@ -154,7 +154,8 @@ def form(
         products: Output labels, correlations (``XX``) and/or Stokes (``I``).
         labels: Correlation labels of the last axis of ``vis``.
         vis: ``(nrow, nchan, ncorr)`` complex, the input column.
-        weight: Same shape, inverse variances of ``vis``.
+        weight: Same shape, inverse variances of ``vis``. None means unit
+            weights without allocating them, for callers that only want values.
         flag: Same shape, bool.
         ant1: ``(nrow,)`` antenna indices into ``gains``. Needed with gains.
         ant2: ``(nrow,)``.
@@ -167,7 +168,10 @@ def form(
         of flagged or undetermined values are zero.
     """
     v = {c: vis[..., k].astype(np.complex128) for k, c in enumerate(labels)}
-    w = {c: weight[..., k].astype(np.float64) for k, c in enumerate(labels)}
+    if weight is None:
+        w = {c: np.broadcast_to(1.0, vis.shape[:-1]) for c in labels}
+    else:
+        w = {c: weight[..., k].astype(np.float64) for k, c in enumerate(labels)}
     f = {c: flag[..., k].astype(bool) for k, c in enumerate(labels)}
     # A weight that is not positive and finite carries no information. Flag it
     # here, so a correlation product does not count it as a degree of freedom

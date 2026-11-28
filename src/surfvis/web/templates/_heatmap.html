@@ -3,16 +3,22 @@
   <div class="panel-head">
     <h2>&chi;<sup>2</sup>/dof &mdash; antenna &times; antenna &middot; {{ product }}</h2>
     <p class="meta">
-      {% if chunk.gtable %}corrected {% endif %}{{ chunk.rcol }}{% if chunk.mcol %} &minus; {{ chunk.mcol }}{% endif %}
-      {% if chunk.gtable %}&middot; gains <code>{{ chunk.gtable }}</code>{% endif %}
+      {% if matrix.gtable %}corrected {% endif %}{{ matrix.rcol }}{% if matrix.mcol %} &minus; {{ matrix.mcol }}{% endif %}
+      {% if matrix.gtable %}&middot; gains <code>{{ matrix.gtable }}</code>{% endif %}
     </p>
     <p class="meta">
-      time slots {{ chunk.t0 }}&ndash;{{ chunk.tf }} &middot;
-      channels {{ chunk.chan0 }}&ndash;{{ chunk.chanf }} &middot;
+      whole scan &middot;
       {{ nvalid }} baselines &middot;
       median {{ "%.2f"|format(median) }} &middot;
       worst {{ "%.2f"|format(worst) }}
     </p>
+    <p class="note stale-note" id="stale-note"{% if not stale.edits %} hidden{% endif %}>
+      <span class="stale-text">{% if stale.edits %}&chi;<sup>2</sup> predates {{ stale.edits }} manual edit{{ "s" if stale.edits != 1 }} in this scan; marked cells are stale{% if not stale.can_recompute %} (re-run chi2){% endif %}{% endif %}</span>
+      <button type="button" class="wf-button" id="recompute"{% if not (stale.edits and stale.can_recompute) %} hidden{% endif %}
+              title="Form these cells' chi-squared again from the MS, as chi2 did, and write them into its output">Recompute {{ stale.cells|length }} stale cell{{ "s" if stale.cells|length != 1 }}</button>
+      <span class="recompute-status" aria-live="polite"></span>
+    </p>
+    <p class="meta recomputed" id="recomputed"{% if not stale.recomputed %} hidden{% endif %}>{{ stale.recomputed }} cell{{ "s" if stale.recomputed != 1 }} recomputed by serve since chi2</p>
   </div>
 
   <div class="heatmap-row">
@@ -26,7 +32,11 @@
         </div>
         <!-- One waterfall request at a time: a new click or arrow key aborts the last. -->
         <div class="grid" hx-sync="this:replace">
-          {% for p in range(nant) %}{% for q in range(nant) %}{% if p == q %}<i
+          {% for p in range(nant) %}{% for q in range(nant) %}{% if p == q and autos %}<i
+            class="auto plotted"
+            hx-get="/waterfall?{{ query }}&p={{ p }}&q={{ q }}"
+            hx-target="#waterfall"
+            data-pq="{{ p }},{{ q }}"></i>{% elif p == q %}<i
             class="auto"
             style="background:{{ colours[p][q] }}"></i>{% else %}<i
             style="background:{{ colours[p][q] }}"
@@ -35,7 +45,7 @@
             data-pq="{{ p }},{{ q }}"></i>{% endif %}{% endfor %}{% endfor %}
         </div>
       </div>
-      <p class="axis readout" id="readout">columns: antenna2 &middot; rows: antenna1 &middot; hover for a baseline, arrow keys to move</p>
+      <p class="axis readout" id="readout">columns: antenna2 &middot; rows: antenna1 &middot; hover for a baseline, arrow keys to move{% if autos %} &middot; diagonal: auto-correlations{% endif %}</p>
     </div>
 
     <figure class="hist">

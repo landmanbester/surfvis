@@ -1,3 +1,6 @@
+import { Carry } from "./carry.mjs";
+import { jobText, recomputedNote, recomputeLabel, staleCells, staleNote } from "./stale.mjs";
+
 // Behaviour htmx does not cover: loading feedback, the selected baseline,
 // the hover readout, keyboard navigation, and carrying waterfall settings
 // from one baseline to the next.
@@ -16,7 +19,8 @@ function cellFor(names) {
   if (!data || !names) return null;
   const p = data.names.indexOf(names[0]);
   const q = data.names.indexOf(names[1]);
-  if (p < 0 || q < 0 || p === q) return null;
+  if (p < 0 || q < 0) return null;
+  // Null for the diagonal unless it plots auto-correlations: only then does it carry data-pq.
   return document.querySelector(`.grid i[data-pq="${p},${q}"]`);
 }
 
@@ -34,13 +38,24 @@ document.body.addEventListener("htmx:beforeRequest", (e) => e.detail.target.clas
 document.body.addEventListener("htmx:afterRequest", (e) => e.detail.target.classList.remove("loading"));
 
 // A cell click carries the waterfall controls the user moved off the
-// heatmap's defaults (the server marks them .keep), so a choice survives a
-// change of baseline.
+// heatmap's defaults, so a choice survives a change of baseline (carry.mjs).
+const carry = new Carry();
+document.body.addEventListener("htmx:afterSettle", (e) => {
+  if (e.detail.target.id !== "waterfall") return;
+  const panel = e.detail.target.querySelector(".panel");
+  if (!panel) return carry.reset();
+  const keep = Object.fromEntries([...panel.querySelectorAll(".keep")].map((el) => [el.name, el.value]));
+  carry.settled(keep, Boolean(panel.dataset.auto));
+});
+
+document.body.addEventListener("change", (e) => {
+  const panel = e.target.closest("#waterfall .panel");
+  if (panel && e.target.name) carry.changed(e.target.name, Boolean(panel.dataset.auto));
+});
+
 document.body.addEventListener("htmx:configRequest", (e) => {
   if (!e.detail.elt.matches(".grid i[data-pq]")) return;
-  document.querySelectorAll("#waterfall .keep").forEach((el) => {
-    e.detail.parameters[el.name] = el.value;
-  });
+  Object.assign(e.detail.parameters, carry.params);
 });
 
 document.body.addEventListener("click", (e) => {
@@ -62,9 +77,154 @@ document.body.addEventListener("htmx:afterSettle", (e) => {
   if (cell) {
     cell.click();
   } else {
-    document.getElementById("waterfall").innerHTML =
-      `<p class="hint">${selected[0]} &times; ${selected[1]} has no data here. Click a cell to plot another baseline.</p>`;
+    const hint = document.createElement("p");
+    hint.className = "hint";
+    const what = selected[0] === selected[1] ? `${selected[0]}'s auto-correlation` : `${selected[0]} \u00d7 ${selected[1]}`;
+    hint.textContent = `${what} has no data here. Click a cell to plot another baseline.`;
+    document.getElementById("waterfall").replaceChildren(hint);
+    carry.reset(); // no panel, so nothing to carry, as before a first click
   }
+});
+
+// Cells whose chi-squared predates manual edits get a marker, and the header
+// says how many and offers to recompute them (stale.mjs). Rendered with the
+// heatmap, and fetched again whenever the waterfall applies or undoes an edit.
+function markStale(stale) {
+  const data = gridData();
+  if (!data) return;
+  const cells = staleCells(stale);
+  const n = data.names.length;
+  document.querySelectorAll(".grid i").forEach((cell, k) => {
+    cell.classList.toggle("stale", cells.has(`${Math.floor(k / n)},${k % n}`));
+  });
+  const note = document.getElementById("stale-note");
+  if (note) {
+    note.querySelector(".stale-text").textContent = staleNote(stale);
+    note.hidden = !staleNote(stale);
+    const button = document.getElementById("recompute");
+    button.textContent = recomputeLabel(stale);
+    button.hidden = !button.textContent;
+  }
+  const done = document.getElementById("recomputed");
+  if (done) {
+    done.textContent = recomputedNote(stale);
+    done.hidden = !done.textContent;
+  }
+}
+
+const sameScan = (a, b) => a && b && a.field === b.field && a.spw === b.spw && a.scan === b.scan;
+
+async function refreshStale() {
+  const where = gridData()?.where;
+  if (!where) return;
+  try {
+    const res = await fetch(`/stale?${new URLSearchParams(where)}`);
+    if (!res.ok) return;
+    const stale = await res.json();
+    // Only if the heatmap on screen is still the one asked about.
+    if (sameScan(gridData()?.where, where)) markStale(stale);
+  } catch (_) {}
+}
+
+document.body.addEventListener("htmx:afterSettle", (e) => {
+  if (e.detail.target.id === "heatmap") markStale(gridData()?.stale);
+});
+document.addEventListener("surfvis:flagged", refreshStale);
+
+// Recompute: start the server's background job, show its progress, and
+// redraw the heatmap when it is done. The redraw is swapped in here rather
+// than through htmx, so the waterfall is not followed (it is the same scan),
+// and it is dropped if the user has moved to another heatmap meanwhile.
+function recomputeStatus(text, error = false) {
+  const status = document.querySelector("#stale-note .recompute-status");
+  if (!status) return;
+  status.textContent = text;
+  status.classList.toggle("error", error);
+}
+
+function recomputeButton(enabled) {
+  const button = document.getElementById("recompute");
+  if (button) button.disabled = !enabled;
+}
+
+async function redrawHeatmap(where) {
+  const query = gridData()?.query;
+  if (!query) return;
+  const res = await fetch(`/heatmap?${query}`);
+  if (!res.ok) throw new Error(`Could not redraw the heatmap (HTTP ${res.status}); reload the page`);
+  const html = await res.text();
+  if (!sameScan(gridData()?.where, where)) return; // the user moved on
+  const target = document.getElementById("heatmap");
+  target.innerHTML = html;
+  htmx.process(target);
+  markSelected();
+  markStale(gridData()?.stale);
+  target.querySelectorAll("img[data-plot]:not([src])").forEach(loadPlot);
+}
+
+async function pollRecompute(where, id) {
+  for (;;) {
+    await new Promise((r) => setTimeout(r, 1000));
+    let job;
+    try {
+      job = await (await fetch("/recompute/state")).json();
+    } catch (err) {
+      recomputeButton(true);
+      return recomputeStatus(`Lost track of the recompute: ${err.message}`, true);
+    }
+    if (!sameScan(gridData()?.where, where)) return; // the user moved on; the job carries on
+    if (job.id !== id) {
+      // Another tab started a job since, or the server restarted: ours is over.
+      recomputeButton(true);
+      return recomputeStatus("The recompute's outcome is unknown; reload to see the cells.", true);
+    }
+    if (job.state === "running") {
+      recomputeStatus(jobText(job));
+      continue;
+    }
+    recomputeStatus(jobText(job), job.state !== "done");
+    if (job.state !== "done") return recomputeButton(true);
+    try {
+      await redrawHeatmap(where);
+    } catch (err) {
+      recomputeStatus(err.message, true);
+    }
+    return;
+  }
+}
+
+document.body.addEventListener("click", async (e) => {
+  const button = e.target.closest("#recompute");
+  if (!button) return;
+  const where = gridData()?.where;
+  if (!where) return;
+  button.disabled = true;
+  try {
+    const res = await fetch("/recompute", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(where),
+    });
+    const job = await res.json();
+    if (!res.ok) {
+      recomputeStatus(job.detail || `HTTP ${res.status}`, true);
+      button.disabled = false;
+      return;
+    }
+    recomputeStatus(jobText(job));
+    pollRecompute(where, job.id);
+  } catch (err) {
+    recomputeStatus(err.message, true);
+    button.disabled = false;
+  }
+});
+
+// The waterfall panel is drawn by static/wf/widget.mjs; mount it whenever the panel is (re)rendered.
+document.body.addEventListener("htmx:afterSettle", (e) => {
+  if (e.detail.target.id !== "waterfall") return;
+  const root = e.detail.target.querySelector(".wf[data-src]");
+  if (!root) return;
+  import(root.dataset.module).then((m) => m.mount(root));
 });
 
 // Hover: a tooltip at the cursor and the readout under the grid, both naming
@@ -73,6 +233,7 @@ function describe(cell) {
   const data = gridData();
   const [p, q] = pq(cell);
   const value = data.values[p][q];
+  if (p === q) return [`${data.names[p]} (${p})`, "auto-correlation"];
   const names = `${data.names[p]} (${p}) \u00d7 ${data.names[q]} (${q})`;
   let stats = `\u03c7\u00b2/dof ${value === null ? "flagged" : value.toFixed(2)}`;
   if (data.positions) {
@@ -111,10 +272,13 @@ document.body.addEventListener("mousemove", (e) => {
 });
 
 // Arrow keys move the selection: up/down change antenna1 (the row),
-// left/right antenna2 (the column), skipping the diagonal.
+// left/right antenna2 (the column), skipping cells that plot nothing (the
+// diagonal, unless the MS has auto-correlations).
 document.addEventListener("keydown", (e) => {
   const steps = { ArrowUp: [-1, 0], ArrowDown: [1, 0], ArrowLeft: [0, -1], ArrowRight: [0, 1] };
   if (!(e.key in steps) || e.target.closest("input, select, textarea")) return;
+  // Mid-selection on the waterfall: moving on would drop the half-drawn shape.
+  if (document.querySelector('#waterfall .wf[data-drawing="1"]')) return;
   const current = cellFor(selected);
   const data = gridData();
   if (!current || !data) return;
@@ -122,12 +286,13 @@ document.addEventListener("keydown", (e) => {
   const n = data.names.length;
   let [p, q] = pq(current);
   const [dp, dq] = steps[e.key];
-  do {
+  let next = null;
+  for (let step = 0; step < n && !next; step++) {
     p = (p + dp + n) % n;
     q = (q + dq + n) % n;
-  } while (p === q);
-  const next = document.querySelector(`.grid i[data-pq="${p},${q}"]`);
-  if (!next) return;
+    next = document.querySelector(`.grid i[data-pq="${p},${q}"]`);
+  }
+  if (!next || next === current) return;
   next.click();
   showReadout(next);
 });
@@ -172,8 +337,10 @@ function pageName() {
     const el = document.querySelector(`#selectors select[name="${name}"]`);
     return el ? el.selectedOptions[0]?.textContent.trim() : "";
   };
-  const parts = ["surfvis", pick("field"), `scan${pick("scan")}`, `t${pick("t")}`, `f${pick("f")}`, pick("c")];
-  if (selected && document.querySelector("#waterfall .panel")) parts.push(`${selected[0]}-${selected[1]}`);
+  const parts = ["surfvis", pick("field"), `scan${pick("scan")}`, pick("c")];
+  if (selected && document.querySelector("#waterfall .panel")) {
+    parts.push(selected[0] === selected[1] ? `${selected[0]}-auto` : `${selected[0]}-${selected[1]}`);
+  }
   return parts.filter(Boolean).join("_").replace(/[^A-Za-z0-9_.+-]+/g, "") + ".png";
 }
 
@@ -213,3 +380,5 @@ async function savePng(button) {
     button.textContent = label;
   }
 }
+
+document.getElementById("save-png")?.addEventListener("click", (e) => savePng(e.currentTarget));

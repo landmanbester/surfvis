@@ -49,7 +49,8 @@ full = [
     # numbers do not order by capability. Never raise the <0.5.0 ceilings:
     # 0.5.x has no write support. Same pins as pfb-imaging; see its wiki
     # design-decisions D14 and ratt-ru/xarray-ms#170.
-    "arcae>=0.4.0a14,<0.5.0; python_version >= '3.11'",
+    # 0.4.0a16 is what xarray-ms's write-support branch requires (see web).
+    "arcae>=0.4.0a16,<0.5.0; python_version >= '3.11'",
     "astropy>=5.0; python_version >= '3.11'",
     "dask>=2023.1; python_version >= '3.11'",
     "dask-ms[xarray, zarr]>=0.2.20; python_version >= '3.11'",
@@ -69,8 +70,13 @@ web = [
     "jinja2>=3.1; python_version >= '3.11'",
     "uvicorn>=0.30; python_version >= '3.11'",
     "msv4-utils>=0.0.3; python_version >= '3.11'",
-    # Same write-support line as arcae above; see the note there.
-    "xarray-ms>=0.4.0a12,<0.5.0; python_version >= '3.11'",
+    # Same write-support line as arcae above; see the note there. Pinned to a
+    # commit of the write-support branch (0.4.0-alpha.16, unreleased) for the
+    # linear-time row-shape check (xarray-ms#183, 25 s per scan open on a
+    # MeerKAT MS), reversed baselines converted on read (#201) and the
+    # corrected/model data groups (#203). Go back to a ">=0.4.0a16,<0.5.0"
+    # range once that alpha is on PyPI: PyPI rejects direct references.
+    "xarray-ms @ git+https://github.com/ratt-ru/xarray-ms@e0433011763de66a8d81261be24c7215c5acb5d6 ; python_version >= '3.11'",
 ]
 
 [project.urls]

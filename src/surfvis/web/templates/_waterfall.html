@@ -1,11 +1,14 @@
-<div class="panel">
+<div class="panel"{% if auto %} data-auto="1"{% endif %}>
   <div class="panel-head">
+    {% if auto %}
+    <h2>{{ name1 }} auto-correlation</h2>
+    <p class="meta">scan {{ base.scan }} &middot; no &chi;<sup>2</sup>: chi2 skips auto-correlations</p>
+    {% else %}
     <h2>{{ name1 }} &times; {{ name2 }}</h2>
     <p class="meta">
-      &chi;<sup>2</sup>/dof {{ "%.2f"|format(value) }} &middot;
-      chunk: time {{ t0 }}&ndash;{{ tf }}, channels {{ chan0 }}&ndash;{{ chanf }}
-      <span class="swatch"></span> outlined below
+      &chi;<sup>2</sup>/dof {{ "%.2f"|format(value) }} over scan {{ base.scan }}
     </p>
+    {% endif %}
   </div>
 
   <form class="controls sub"
@@ -49,6 +52,7 @@
     <label>flags
       <select name="flagversion"{% if "flagversion" in keep %} class="keep"{% endif %}>
         <option value="" {% if not s.flagversion %}selected{% endif %}>FLAG (current)</option>
+        <option value="{{ no_flags }}" {% if s.flagversion == no_flags %}selected{% endif %}>none</option>
         {% for name in flagversions %}
         <option value="{{ name }}" {% if name == s.flagversion %}selected{% endif %}>{{ name }}</option>
         {% endfor %}
@@ -66,7 +70,7 @@
   {% if differs %}
   <p class="note">
     The waterfall no longer shows what the heatmap measured
-    ({{ chunk.selection.product }}, {% if chunk.gtable %}corrected {% endif %}{{ chunk.rcol }}{% if chunk.mcol %} &minus; {{ chunk.mcol }}{% endif %}, current flags).
+    ({{ matrix.selection.product }}, {% if matrix.gtable %}corrected {% endif %}{{ matrix.rcol }}{% if matrix.mcol %} &minus; {{ matrix.mcol }}{% endif %}, current flags).
   </p>
   {% endif %}
 
@@ -75,9 +79,33 @@
     {% for problem in problems %}<li>{{ problem }}</li>{% endfor %}
   </ul>
   {% else %}
-  <div class="plot loading" data-label="Reading visibilities&hellip;">
-    <img class="waterfall" data-plot="/waterfall.png?{{ query }}"
-         alt="Waterfall for baseline {{ name1 }} to {{ name2 }}">
+  <div class="wf" data-src="/waterfall.bin?{{ query }}"
+       data-module="/static/wf/widget.mjs?v={{ static_version }}"
+       {% if flagging %}data-flag="{{ flag_context|tojson|forceescape }}" data-names="{{ [name1, name2]|tojson|forceescape }}"{% endif %}>
+    <div class="wf-bar">
+      <span class="wf-title"></span>
+      <label class="wf-check"><input type="checkbox" class="wf-flags" checked> show flags</label>
+      <button type="button" class="wf-reset">Reset view</button>
+    </div>
+    {% if flagging %}
+    <div class="wf-bar wf-flagbar">
+      <label class="wf-check" title="Flag every correlation of the baseline, not only those the plotted product is formed from">
+        <input type="checkbox" class="wf-allcorr" checked> all correlations</label>
+      <label class="wf-check" title="Which baselines of this scan a selection is applied to">baselines
+        <select class="wf-scope">
+          <option value="baseline" selected>this one</option>
+          {% for index, name in scope_antennas %}<option value="antenna:{{ index }}">every baseline of {{ name }}</option>
+          {% endfor %}<option value="all">all baselines</option>
+        </select></label>
+      <button type="button" class="wf-apply wf-button" hidden></button>
+      <button type="button" class="wf-undo wf-button" hidden></button>
+      <span class="wf-flagstatus" aria-live="polite"></span>
+    </div>
+    {% endif %}
+    <div class="plot loading" data-label="Reading visibilities&hellip;">
+      <canvas class="wf-canvas" aria-label="Waterfall for {% if auto %}the auto-correlation of {{ name1 }}{% else %}baseline {{ name1 }} to {{ name2 }}{% endif %}"></canvas>
+    </div>
+    <p class="axis wf-readout">wheel: zoom &middot; shift-drag or middle-drag: pan &middot; 0: reset{% if flagging %} &middot; drag: rectangle &middot; click: polygon &middot; Enter: close, then flag &middot; Esc: cancel &middot; Ctrl/Cmd-Z: undo{% endif %}</p>
   </div>
   {% endif %}
 </div>

@@ -2,38 +2,166 @@
 type: log
 title: Wiki changelog
 description: Chronological record of what changed in the wiki and why.
-timestamp: 2026-11-05
-last_verified_commit: 4e90452
+timestamp: 2026-11-28
+last_verified_commit: 1c29b94
 ---
 
 # Wiki changelog
 
-## 2026-11-05 — serve-ui review fixes (verified at `4e90452`)
+## 2026-11-28 — flagging complete, docs brought up to date (verified at `1c29b94`)
 
-- **Updated** `web-app.md`: reversed cells follow the MS's antenna order; the
-  gain-table menu and its allow-list; chunks read one matrix (`cache=False`);
-  plots fetched by `app.js`; `hx-sync` on the grid; the scan select refreshes
-  the bins; what browsing the grid reads from the MS; stale worker signature
-  and xarray-ms version.
-- **Updated** `chi2-pipeline.md`: outputs are validated before deletion and
-  foreign directories refused; non-positive weights are flagged; the
-  `__main__` guard the spawn pool needs.
+- **web-app.md:** the lock check (`wait_unlocked`, 409 naming the holder;
+  byte 0 only, since every open table holds byte 1);
+  issue #16 marked implemented in full.
+- **index.md:** web-app.md's coverage now lists flagging, shutdown,
+  profiling and the canvas waterfall.
+- **chi2-pipeline.md:** the `created` attr and the recompute that must
+  follow chi2's recipe.
+- Removed `docs/superpowers/` (the canvas-waterfall spec and plan): specs
+  are not retained, and web-app.md covers what was built.
 
-## 2026-11-05 — review decisions merged up from hipped (verified at `2a97e03`)
+## 2026-11-28 — stopping serve cleanly (verified at `c84ad30`)
 
-- **Updated** `chi2-pipeline.md`: the `flag-chi2` fixes (autocorrelations
-  skipped, non-finite flagged, no `fastmath`, `FLAG_ROW` only ever added to).
-  `--dataout` stays implemented here; hipped's "not yet implemented" marking
-  was not taken.
-- **Updated** `migration.md`: `surf --opdir` defaults to the working directory.
+- **web-app.md:** new section on `web/server.py`: SIGHUP/SIGINT/SIGTERM all
+  shut down gracefully within seconds, writes in progress finish, then
+  `os._exit` past reading threads.
+- **web-app.md:** after review: nohup respected, flag writes waited for
+  without a cap, the probe's death signal set inside the probe.
 
-## 2026-11-05 — review fixes merged up from hipped (verified at `853555a`)
+## 2026-11-28 — "none" in the flags menu (verified at `7f526ca`)
 
-- **Updated** `chi2-pipeline.md`: `--nfreqs -1` is resolved per dataset (it
-  leaked the first SPW's width into the rest). hipped also fixed the identical
-  per-correlation images and the missing-antenna crash; this branch already
-  had both, by its own route (per-product slices, chunks padded into the
-  ANTENNA-sized grid).
+- **web-app.md:** the waterfall's flags menu offers **none**, which hides
+  MS flags and keeps FLAG's colour limits.
+- **web-app.md:** one colour scale per plane, from FLAG when first drawn,
+  shared by every flag version, so switching flags never rescales.
+
+## 2026-11-27 — recomputing stale cells (verified at `2cca15c`)
+
+- **web-app.md:** step 5 of #16: staleness per cell against the zarr's new
+  `computed` array; `POST /recompute` and `web/recompute.py`, which follows
+  chi2's recipe (FLAG only, rows as stored, float32 `1/σ²`); how
+  `write_cells` keeps chi2's attrs and stamps cells with the job's start.
+  `GLOSSARY.md` redefines stale per cell and adds recompute.
+
+## 2026-11-27 — wider scopes, audit log, stale heatmaps (verified at `b17b49a`)
+
+- **web-app.md:** step 4 of #16: a selection's scope (the panel's baseline,
+  every baseline of one of its antennas, or every baseline in the scan),
+  one edit per selection; edits stored as compressed bit masks over the
+  selection's channel range, written in chunks; the audit log
+  (`surfvis_flags.jsonl`) and how the journal keeps it honest across a
+  crash; the zarr's `created` attr and the heatmap's stale markers.
+  `GLOSSARY.md` redefines edit and scope and adds audit log and stale.
+
+## 2026-11-27 — auto-correlation waterfalls (verified at `c26cd15`)
+
+- **web-app.md:** the heatmap's diagonal plots auto-correlation waterfalls:
+  the zarr's `autocorrelations` attr, `auto_corrs=True` and the padded
+  baselines it adds to an MS without autos, an auto's defaults (no model, no
+  χ², no mismatch note), and settings carried through the diagonal.
+
+## 2026-11-26 — selection on the canvas (verified at `2497dec`)
+
+- **web-app.md:** step 3 of #16: drawing, previewing, confirming and undoing
+  selections on the canvas; the `/flag` contract with the panel's settings,
+  all correlations by default, and undo by edit id; the review findings
+  that shaped it (key auto-repeat, focus, double-click on the first vertex,
+  near-tie rasteriser cases). `GLOSSARY.md` holds the flagging terms.
+
+## 2026-11-26 — crash-safe flag writes (verified at `2199c48`)
+
+- **web-app.md:** casacore's truncate-and-rewrite of a TiledShapeStMan header
+  can brick an MS if a write is killed; flag writes are now journalled and
+  fsynced, and `serve --allow-flagging` rolls back an interrupted edit at
+  startup. Broken-MS probes run in a child process (casacore's in-process
+  lock registry); exit waits for a write in flight; backups are renamed into
+  place when complete.
+
+## 2026-11-26 — flag writes keep the open scan; MSv2 names on screen (verified at `ebd836a`)
+
+- **web-app.md:** FLAG is read by row on every request and never cached, so
+  a flag write, undo or flag-version switch costs one FLAG read instead of a
+  24 s partition rebuild (`msdata.writing`); the plane cache is keyed on a
+  generation and holds no FLAG; menus and titles use MSv2 column names.
+
+## 2026-11-26 — checked against a live server on com08 (verified at `33069db`)
+
+- **web-app.md:** mirrored heatmap cells share a plane-cache entry; what a
+  waterfall costs on a MeerKAT MS, and why the column reads are slow (the
+  MS's tiling).
+
+## 2026-11-26 — xarray-ms write-support branch (verified at `9ef9390`)
+
+- **web-app.md:** xarray-ms pinned to a write-support commit; the
+  corrected/model data groups (`VISIBILITY_CORRECTED`, `VISIBILITY_MODEL`);
+  reversed baselines converted on read, `stored_order` replaced by
+  `view_order`, cross-hands swapped on reversed rows by the flag writer and
+  the flag-version reader; non-standard columns declared `hermitian`; the
+  third profiling round (row-shape check: 25 s to 0.06 s per scan open).
+
+## 2026-11-06 — warm-up, per-scan rows, vectorised heatmap colours (verified at `5c7561c`)
+
+- **web-app.md:** the second profiling round on a 10.9 M-row MS: heatmap
+  colours, `scan_rows()`, the background warm-up and `_Coalescer`; and the
+  open problem that `invalidate()` after a flag write reopens the scan.
+
+## 2026-11-06 — the first waterfall no longer opens the datatree (verified at `29b63fb`)
+
+- **web-app.md:** `data_group()` returns the MSv2 backend's constant `base`
+  group instead of opening every partition; the profiler's stuck-request
+  watchdog, `SIGUSR1` stack dumps and `render template` span.
+
+## 2026-11-06 — request profiling (verified at `8741113`)
+
+- **web-app.md:** new "Profiling" section for `serve --profile DIR`: spans via a
+  `ContextVar`, `Server-Timing`, `spans.jsonl`, cProfile dumps of slow
+  requests, and the first finding (the datatree opened twice on the first
+  waterfall).
+
+## 2026-11-05 — flagging review fixes; whole-scan heatmaps (verified at `00cccac`)
+
+- **Updated** `web-app.md`: FLAG_ROW only ever set; undo clears only the
+  cells an edit set; failed writes put back; the backup taken in the
+  background at startup (503 until done), named to the microsecond; antenna
+  order from the MS (`stored_order`), since xarray-ms mislabels reversed
+  baselines; plane misses coalesced; widget teardown on swap.
+- **Updated** `web-app.md`, `chi2-pipeline.md`: the zarr holds per-scan
+  totals `(product, antenna1, antenna2)`; the viewer drops the time and
+  frequency bins and the chunk outline; old stores are summed on read.
+
+## 2026-11-05 — serve-ui review fixes merged up (verified at `023dc05`)
+
+- **Updated** `web-app.md` and `chi2-pipeline.md`, via serve-ui: antenna order
+  of reversed cells (which the canvas plane and `/waterfall.bin` share), the
+  gain-table allow-list (also on `/waterfall.bin`), index checks (`/flag`
+  rejects a negative antenna index, which would have wrapped to another
+  baseline), output safety in `chi2`, and zero weights.
+
+## 2026-11-05 — review decisions merged up from serve-ui (verified at `02a50cf`)
+
+- **Updated** `chi2-pipeline.md` and `migration.md`, via serve-ui: hipped's
+  `flag-chi2` fixes and the `surf --opdir` default.
+
+## 2026-11-05 — review fixes merged up from serve-ui (verified at `c57e964`)
+
+- **Updated** `chi2-pipeline.md` (via serve-ui): `--nfreqs -1` is resolved per
+  dataset. No canvas or flagging page changed.
+
+## 2026-10-16 — plane cache and widget fixes (verified at `d4a40a0`)
+
+- **Updated** `web-app.md`: "Plane cache" section (key, memory, colour limits),
+  `wheelFactor`, single first fetch, fetch abort.
+
+## 2026-10-16 — canvas waterfall widget (verified at `dfee997`)
+
+- **Updated** `web-app.md`: new "Canvas waterfall" section (route, wire format,
+  modules, interactions, `no-cache` static header); loading-feedback bullet.
+
+## 2026-10-16 — flagging write path (verified at `3eb66e8`)
+
+- **Updated** `web-app.md`: new "Manual flagging (write path)" section --
+  polygon rasterisation, `/flag`, the backup flag version (and why `_c_order`
+  stays in the descriptor), undo, cache invalidation.
 
 ## 2026-10-16 — Save as PNG (verified at `1ab4f7c`)
 

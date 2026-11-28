@@ -49,7 +49,7 @@ docker run --rm --user "$(id -u):$(id -g)" -e HOME=/tmp -v "$PWD":/src -w /src \
    PYTHONPATH=/tmp/t:/src/src:/src /tmp/t/bin/pytest tests/ -q -W ignore"
 ```
 
-That is the only way to run the full suite (65 tests). **CI does not run them** —
+That is the only way to run the full suite (151 tests; the node one skips in the container). **CI does not run them** —
 `.github/workflows/ci.yml` installs the lightweight package only, deliberately,
 since python-casacore and numba make CI slow and brittle. Verify locally.
 
@@ -79,11 +79,11 @@ Three layers, and the boundary between them is load-bearing:
 - **`utils/`** is heavy too (`chisq.py` numba kernels, `plotting.py` matplotlib)
   and is imported only from `core/`.
 - **`web/`** is the browser: `store.py` (zarr), `msdata.py` (MS via xarray-ms
-  and arcae), `render.py` (colours + PNGs), `app.py` (FastAPI), `templates/`
+  and arcae), `render.py` (colours + PNGs), `planes.py` (waterfall reduction), `profiling.py` (`serve --profile`), `recompute.py` (stale cells by chi2's recipe), `server.py` (uvicorn and shutdown), `app.py` (FastAPI), `templates/`
   (htmx partials) and `static/app.js` (selection, hover readout, arrow keys,
-  carried settings, loading states, Save as PNG). `htmx.min.js` and
+  carried settings via `static/carry.mjs`, stale markers via `static/stale.mjs`, loading states, Save as PNG; a module), and `static/wf/` (the canvas waterfall as ES modules, node-tested via `tests/test_js.py`; node is not in the container). `htmx.min.js` and
   `html-to-image.js` are vendored, not loaded from a CDN: compute nodes are
-  often offline. Dask-free, and read-only for now.
+  often offline. Dask-free. `flagging.py` is the one write path (below).
 - **`utils/products.py` and `utils/gains.py`** are the exception to "utils is
   heavy": numpy/xarray only, shared by `chi2` and `web/` so the heatmap and the
   waterfall form corrected residuals and Stokes products with the same code.
@@ -92,8 +92,9 @@ Three layers, and the boundary between them is load-bearing:
 stack, `[web]` the browser. The Dockerfile installs `[full,web]`.
 
 Data flow for the browser: `chi2 --dataout` writes χ² and counts per
-`(time bin, freq bin, product, antenna, antenna)`, one zarr group per
-`(field, spw, scan)`. `serve` reads that for the heatmap and only opens the MS
+`(product, antenna, antenna)`, summed over the scan, one zarr group per
+`(field, spw, scan)`. `--ntimes`/`--nfreqs` only chunk the work (and the
+per-chunk PNGs); the browser shows one scan at a time. `serve` reads that for the heatmap and only opens the MS
 when a waterfall is requested. The waterfall's model / gain table / flag
 version / product controls recompute the waterfall only; they default to how
 `chi2` formed the heatmap, and the panel says when they no longer match.
@@ -146,13 +147,30 @@ forever, with no output. The failure is load-dependent, so it presents as an
 intermittent hang.
 
 **MSv4 renames columns; resolve, do not hardcode.** `DATA` is exposed as
-`VISIBILITY`, `WEIGHT_SPECTRUM` as `WEIGHT`. Read them from
-`attrs["data_groups"][group]`, as `pfb-imaging`'s `core/imager.py` does.
-`data_groups` is attached by `open_datatree`, **not** `open_dataset`. Columns
-outside the MSv2 standard (`RESIDUAL`) are not renamed, and neither are
-`CORRECTED_DATA` and `MODEL_DATA`: xarray-ms keeps them as secondary variables
-under their own names. Mapping `CORRECTED_DATA` to `VISIBILITY` (as
-`DataGroup.resolve` once did) silently plots `DATA`.
+`VISIBILITY`, `CORRECTED_DATA` as `VISIBILITY_CORRECTED`, `MODEL_DATA` as
+`VISIBILITY_MODEL` and `WEIGHT_SPECTRUM` as `WEIGHT`, through
+`msdata.data_group().resolve()`. The standard data groups are constants, so
+**never open the datatree to learn them**: that opens every partition, over
+ten minutes on a real MS before the first waterfall. Columns outside the MSv2
+standard (`RESIDUAL`) are not renamed. Mapping `CORRECTED_DATA` to
+`VISIBILITY` (as `DataGroup.resolve` once did) silently plots `DATA`. The
+other direction, `msdata.msv2_name`, is what menus and titles show: the UI
+speaks MSv2.
+
+**Partitions include auto-correlations, padded when absent.**
+`_open_partition` passes `auto_corrs=True` so the heatmap's diagonal can plot
+them; on an MS without any, xarray-ms adds one all-NaN, all-flagged baseline
+per antenna. Look baselines up by name (`baseline_index`), never by position
+or count. `chi2` still skips them and records `autocorrelations` per scan.
+
+**Baselines are presented upper-triangular.** xarray-ms converts a row stored
+as `ANTENNA1 > ANTENNA2` on read (conjugated, cross-hands swapped), so gains,
+labels and titles follow `baseline_antenna1/2_name` (`msdata.view_order`).
+Code that touches MS rows directly -- flag versions, `Flagger` -- gets a
+`reversed` mask from `msdata.baseline_rows` and swaps cross-hands on those
+rows (`msdata.reversed_correlations`). xarray-ms drops non-standard columns
+from partitions with reversed rows unless their orientation is declared, so
+`_open_partition` declares every non-standard 2-D column `hermitian`.
 
 **xarray-ms decodes TIME to unix seconds.** Gain tables and flag versions are
 keyed on the raw MJD-second `TIME`, so `msdata.ms_times()` adds the offset back
@@ -191,10 +209,43 @@ the MSv4 view unless `FEED` (validated against ANTENNA1/2), `STATE`, and the
 
 **`--dataout` and `--imagesout` are deleted and recreated** on every `chi2` run.
 
+**The canvas waterfall's plane cache is memory-heavy.** `msdata.cached_plane`
+keeps four planes at ~9 bytes per cell (complex64 + flags), so 450 x 32768 is
+~130 MB each; keep it complex64 and never cache `values`.
+
+**Nothing cached may hold FLAG.** `msdata._baseline_flags` reads FLAG (or a
+flag version) by row with arcae on every request; cached planes hold only the
+values and the flags the data implies (gaps, gains), and `_with_flags` ORs FLAG
+in, which is exact because `products.form` flags a product wherever any
+correlation it reads is flagged. That is what lets a `Flagger` write, wrapped
+in `msdata.writing(ms)`, cost one FLAG read to show instead of a partition
+rebuild (25 s per scan on a MeerKAT MS). `invalidate()` is for data-column
+rewrites only; never call it after a flag write.
+
+**A killed flag write could brick the MS; the journal is what prevents it.**
+casacore flushes a TiledShapeStMan by truncating its header file and writing
+it again, with no fsync, so a kill in between leaves an MS that does not open.
+`Flagger._write` journals the edit and those headers (fsynced) before writing,
+fsyncs the storage managers' files after, and `flagging.recover()` (run by
+`serve --allow-flagging` at startup) restores and rolls back. Any new write
+path must go through `_write`. Never try to open a possibly broken MS inside
+the server: a failed arcae open leaves a lock in casacore's in-process
+registry and the next write hangs, so `_opens()` probes in a child process.
+
 **`serve` opens only the gain tables it offers.** It has no authentication,
 so `gtable` in a query string must not name arbitrary paths: the term `chi2`
 used, `serve --gtable` ones, and `*.qc` terms next to the MS. Keep any new
 path-valued query parameter on an allow-list the same way.
+
+**`serve` must stop within seconds on SIGHUP, SIGINT or SIGTERM** (a dropped
+ssh connection is a SIGHUP). `web/server.py` runs uvicorn, lets writes in
+progress finish through `app.state.shutdown`, then `os._exit`s past threads
+still reading: anyio's request workers are not daemons, and the interpreter
+would otherwise wait out a minutes-long MS read. Any new background writer
+must stop or finish inside that shutdown; any new child process must die with
+the server (`flagging._PROBE` sets `PR_SET_PDEATHSIG` itself; never use a
+`preexec_fn` in this threaded process). Under `nohup` a hangup stays ignored. `tests/test_shutdown.py` sends each
+signal to the real command.
 
 **`serve` carries no `@stimela_cab`** and must not. A long-running GUI is not a
 batch task. `generate-cabs` skips undecorated functions, which is what keeps
@@ -207,9 +258,14 @@ and `serve` need 3.11+.
 
 **The xarray-ms/arcae pins point down, deliberately.** Write support (needed to
 move `flag-chi2` onto `to_msv2`) is on the `0.4.0a*` line, which is cut from
-later commits than `0.5.x`; `0.5.x` has none. Hence `xarray-ms>=0.4.0a12,<0.5.0`,
-`arcae>=0.4.0a14,<0.5.0` and `prerelease = "allow"`, as in pfb-imaging. Never
-raise the ceilings. Allowing prereleases also resolves dask-ms to `0.3.0a1`
+later commits than `0.5.x`; `0.5.x` has none. Hence `arcae>=0.4.0a16,<0.5.0`
+and `prerelease = "allow"`, as in pfb-imaging. Never raise the ceilings.
+xarray-ms is **pinned to a commit of its `write-support` branch**
+(`0.4.0-alpha.16`, not yet on PyPI) for the linear-time row-shape check
+(xarray-ms #183: 25 s per scan open on a MeerKAT MS), reversed-baseline
+conversion (#201) and the corrected/model data groups (#203); the Dockerfile
+installs git to fetch it. Switch back to `xarray-ms>=0.4.0a16,<0.5.0` once that
+alpha is released: PyPI rejects a package with a direct reference. Allowing prereleases also resolves dask-ms to `0.3.0a1`
 and zarr to 3; the suite passes on both.
 
 **New table reads go through arcae, not python-casacore.** surfvis is moving
@@ -244,14 +300,56 @@ The project is **moving away from Dask and distributed**. `core/chi2.py` and
 not. Before writing new parallel
 or kernel code, consult `rarg-ray-patterns` (Ray actor autoscaling,
 `wrap_future` bridging `ObjectRef` to asyncio) and `rarg-numba-patterns` (atomic
-spinlocks, typed pointer intrinsics). Manual flagging from the waterfall is designed in issue #16 (rectangle select on
-the PNG, arcae writes, `--allow-flagging`, a flag-version backup and undo);
-read it before adding any write path to `web/`.
-
-The spawn workaround above is a band-aid
+spinlocks, typed pointer intrinsics). The spawn workaround above is a band-aid
 over the fork+threads architecture that this migration removes: numba atomics
 would let the chi-squared kernel accumulate into one shared matrix, deleting the
 process pool, the pickling and the parent reduction together.
+
+**Manual flagging** from the waterfall (issue #16) is implemented; see
+`docs/wiki/web-app.md` "Manual flagging". The write path is
+`web/flagging.py`: selections are polygons in (time slot, channel), rasterised
+on the server by cell centre and even-odd; writes need `serve
+--allow-flagging`, save FLAG as a CASA flag version before the first write, and
+keep an undo stack. The canvas draws selections (`static/wf/selection.mjs`
+for the gestures, `select.mjs` for the cell rule, `flagtool.mjs` for the
+wiring); `select.mjs` must agree with `flagging.rasterise` cell for cell,
+which `tests/js/rasterise_cases.json` pins. No single key press or gesture
+may both close a selection and write it. A selection's scope is the panel's
+baseline, an antenna's baselines or the whole scan, and is one edit however
+wide: an edit holds the cells it changed as compressed bit masks over the
+selection's channel range, written in row chunks, never as cell indices.
+Every edit, undo and rollback goes into the audit log
+(`<ms>.flagversions/surfvis_flags.jsonl`), written before the journal is
+retired, and the heatmap derives its stale markers from it
+(`flagging.stale_cells`, `static/stale.mjs`). Staleness is per cell (the
+zarr's `computed` times, else its `created` attr). `web/recompute.py`
+recomputes stale cells by chi2's recipe -- FLAG only, rows as stored -- and
+`Chi2Store.write_cells` is the one write path to the zarr; a test pins
+agreement with `chi2` to 1e-9, so change both together. Any new write to
+the MS goes through `Flagger`, and so checks `flagging.wait_unlocked` first:
+casacore would otherwise wait without limit on any other process's table lock,
+even an idle reader's, and the request would hang. Probe byte 0 of
+`table.lock` only: every process with the table open holds byte 1, which
+blocks nothing.
+
+**The waterfall's colour scale ignores the flags menu.** It is set once per
+plane from FLAG when first drawn and kept in `msdata._LIMITS`, outside the
+plane LRU, so switching flag versions (or "none", `msdata.NO_FLAGS`), editing
+flags or evicting the plane never rescales it.
+
+## Agent skills
+
+### Issue tracker
+
+GitHub Issues on the fork `landmanbester/surfvis` (`origin`), via `gh`; `ratt-ru/surfvis` is `upstream`. See `docs/agents/issue-tracker.md`.
+
+### Triage labels
+
+The five defaults: needs-triage, needs-info, ready-for-agent, ready-for-human, wontfix. See `docs/agents/triage-labels.md`.
+
+### Domain docs
+
+Single-context: `GLOSSARY.md` and `docs/adr/` at the repo root (created lazily), alongside the canonical `docs/wiki/`. See `docs/agents/domain.md`.
 
 ## LLM wiki
 

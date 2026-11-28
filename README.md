@@ -125,7 +125,7 @@ Things to know:
 ## Browsing chi-squared interactively
 
 `surfvis serve` turns `surfchi2` output into a browsable page: an
-antenna-by-antenna chi-squared grid for one chunk, the histogram over all
+antenna-by-antenna chi-squared grid for one scan, the histogram over all
 antenna pairs beside it, and a click on any cell plotting that baseline's
 waterfall straight from the Measurement Set.
 
@@ -157,7 +157,9 @@ add `--rcol DATA --mcol MODEL_DATA --gtable gains.qc/NET` to the command above.
 
 The waterfall panel can switch product (correlation or Stokes), subtract a
 model column, apply a QuartiCal gain term (`gains.qc/NET`) and overlay a saved
-CASA flag version, all on the fly. Those controls change the waterfall only;
+CASA flag version, or no flags at all (**none**, to see what the mask hides),
+all on the fly. The colour scale comes from the current FLAG whichever flags
+are shown, so switching flags never rescales. Those controls change the waterfall only;
 the heatmap is what `chi2` computed, and the panel says when the two differ.
 
 ### 2. Start the server
@@ -178,7 +180,9 @@ Useful flags:
 | `--gtable` | none | A gain term the waterfall may offer (repeatable). The term `chi2` used, and terms in `*.qc` directories next to the MS, are offered anyway; no other path is opened. |
 | `--host` | `127.0.0.1` | Use `0.0.0.0` in a container, or to accept remote connections. |
 | `--port` | `8000` | Change if the port is taken. |
+| `--allow-flagging` | off | Let the browser write FLAG (see below). |
 | `--reload` | off | Development only. |
+| `--profile DIR` | off | Time every request: a per-step breakdown is printed, appended to `DIR/spans.jsonl` and sent as a `Server-Timing` header (the browser's network panel shows it). Requests over a second also leave a cProfile dump in `DIR`. `python -m surfvis.web.profiling DIR` totals the steps. |
 
 `--host 127.0.0.1` means nothing outside the machine can reach it. That is the
 right default; to view it from your laptop, forward the port rather than
@@ -243,6 +247,12 @@ remote host, then forward it to your laptop exactly as above.
 If port 8000 is already taken, pick another and keep both sides consistent:
 `--port 8042` with `-L 8042:localhost:8042`.
 
+**Stopping it.** Ctrl-C, `kill`, or a dropped ssh connection all stop the
+server within a few seconds and leave no process behind. A flag write in
+progress is finished first (signal again to abandon it; the next start rolls
+it back). To keep the server running after you disconnect, start it under
+`tmux`, `screen` or `nohup`; under `nohup` a hangup is ignored.
+
 ### Using the interface
 
 **Save as PNG** (top right) saves the whole page, including whatever is
@@ -254,15 +264,23 @@ A bar across the top of the page runs while anything is loading. The part being
 replaced dims, and plots show a spinner until they arrive; reading a waterfall
 from the MS is the slow part.
 
-**The controls along the top** choose which chunk you are looking at: field
-(listed by name), spw, scan, then the time bin and frequency bin within that scan, then the
-polarization. These are the same chunks `surfchi2` wrote PNGs for -- the bins
-follow the `--ntimes` and `--nfreqs` you ran with.
+**The waterfall** is drawn in the browser. The wheel zooms, shift-drag (or
+middle-drag) pans, `0` or "Reset view" resets, and hovering shows the time,
+frequency and value under the cursor. "show flags" toggles the flag overlay.
+Zooming in fetches the visible window at finer resolution.
+
+**The controls along the top** choose what you are looking at: field (listed
+by name), spw, scan, then the product. The grid covers the whole scan, every
+time and channel; `--ntimes` and `--nfreqs` only split the work in `chi2`
+(and set the per-chunk PNGs it writes).
 
 **The grid** is chi-squared per degree of freedom for every antenna pair, the
 same quantity as the `surfchi2` images. Rows are antenna1, columns antenna2,
-and it is symmetric. Dark grey cells along the diagonal are auto-correlations,
-which carry no chi-squared; dark grey anywhere else means every visibility for
+and it is symmetric. Cells along the diagonal are auto-correlations, which
+carry no chi-squared. When the MS has them the diagonal is hatched, and
+clicking a cell there plots that antenna's auto-correlation waterfall (with
+no model subtracted, by default), which is often where RFI shows first;
+otherwise it is dark grey. Dark grey anywhere else means every visibility for
 that pair was flagged. Antenna names label both axes. Hovering a cell shows
 both antennas' names and numbers, the chi-squared/dof and the baseline length. A single bad antenna
 shows up as a bright row *and* column -- that cross is the pattern worth
@@ -271,7 +289,7 @@ the worst pairs.
 
 **The histogram** beside the grid is the whole distribution over antenna pairs,
 with a dashed line at chi-squared/dof = 1 when that falls within the data. This is how you judge whether a
-chunk has outliers at all: a single clean peak means the colour scale is just
+scan has outliers at all: a single clean peak means the colour scale is just
 stretched over noise, whereas a long tail or a detached bar means something is
 genuinely wrong. The colourbar underneath is the scale the grid is using.
 
@@ -284,13 +302,12 @@ better view once you know where the problem is, though it degenerates when
 there are few antenna pairs. `full` is plain min-to-max.
 
 **Clicking any cell** plots that baseline's waterfall below: the whole scan by
-all channels against UTC, for the product you are viewing. The chunk you
-clicked is outlined in green, so you can see whether the bad chunk is isolated
-or part of something larger. Flagged data is greyed out, as are slots where the
-MS has no data at all.
+all channels against UTC, for the product you are viewing, so you can see
+whether the problem is a short burst, a band of channels or the whole scan.
+Flagged data is greyed out, as are slots where the MS has no data at all.
 
 The selected baseline stays selected. **Arrow keys** move it (up/down change
-antenna1, left/right antenna2), and changing the field, scan, bin or product
+antenna1, left/right antenna2), and changing the field, scan or product
 re-plots the same baseline there.
 
 **The controls under the waterfall** re-plot it without changing your place in
@@ -302,25 +319,85 @@ or in the model subtracted from it. Anything you change carries over as you
 click from baseline to baseline. Once the settings no longer match the heatmap,
 the panel says so.
 
+### Flagging by hand
+
+`surfvis serve` is read-only unless started with `--allow-flagging`. With it,
+you can flag by hand on a baseline's waterfall
+([#16](https://github.com/ratt-ru/surfvis/issues/16)):
+
+| Do | To |
+|---|---|
+| drag | select a rectangle of cells |
+| click, click, click... | draw a polygon; click its first vertex, double-click or press Enter to close it |
+| Backspace / Esc | drop the last vertex / cancel |
+| Enter, or the Flag button | flag the pending selection, after reading how many new cells it covers |
+| Ctrl/Cmd-Z, or the Undo button | undo the latest edit, which the button names |
+
+A closed selection is only shaded and counted; nothing is written until you
+confirm it. "All correlations" (on by default) flags every correlation of the
+baseline; untick it to flag only those the plotted product is formed from.
+"Baselines" widens a selection to every baseline of one of the panel's
+antennas (its auto-correlation included) or to every baseline in the scan;
+it resets to "this one" on every new panel, and the Flag button says how
+many baselines it will touch. Whatever its scope, one selection is one edit
+and one undo. A
+pending selection follows you to the next baseline of the same scan, so one
+patch of RFI can be flagged across baselines with the arrow keys and Enter.
+Drawing is disabled while the flags menu shows a saved flag version or none. Before
+its first write, a flagging session saves FLAG as a CASA flag version named
+`surfvis_before_<UTC timestamp>`, so `flagmanager` (or the flags menu) can
+restore it.
+
+Every edit, undo and rollback is appended to an audit log,
+`<ms>.flagversions/surfvis_flags.jsonl`: one JSON line saying when, who,
+where, the scope, the polygon (in slots and channels, and as UTC times and
+frequencies) and how many cells changed. The heatmap reads it: in a scan
+with edits newer than its `chi2` run, the header says so and the cells
+those edits touched get a corner mark. With `--allow-flagging` the note
+offers **Recompute N stale cells**: `serve` forms those cells' χ² again from
+the MS, exactly as `chi2` did (same columns, model, gains, products and
+weights), and writes them into the `chi2` output in the background. The
+header then says how many cells `serve` has recomputed. The per-chunk PNGs
+in `--imagesout` are left as `chi2` wrote them.
+
+A crash, `kill -9` or power cut in the middle of a write cannot leave the MS
+unopenable or an edit half-applied. Every write is journalled in
+`<ms>.flagversions/surfvis_journal/` first, and the next `surfvis serve
+--allow-flagging` on that MS rolls the interrupted edit back, restoring any
+storage-manager header the interruption broke, before it does anything else.
+Started without `--allow-flagging`, it warns that a journal is waiting. Leave
+the journal alone; it is deleted once it has been applied.
+
+If another program has the MS open -- CASA, a flagger, even an idle Python
+session that has read it -- casacore would make a write wait for it
+indefinitely. Instead `serve` waits a few seconds, then refuses the flag or
+undo, saying which process holds the MS; close the table there and try
+again. Nothing is written in the meantime.
+
 ### A note on column names (MSv2 vs MSv4)
 
 Waterfalls are read through
 [xarray-ms](https://github.com/ratt-ru/xarray-ms), which presents an MSv2 table
-as an **MSv4** view. MSv4 renames the columns you are used to:
+as an **MSv4** view, which renames the columns you are used to. surfvis
+translates back, so menus and titles use the MSv2 names:
 
 | You know it as | MSv4 calls it |
 |---|---|
 | `DATA` | `VISIBILITY` |
-| `CORRECTED_DATA` | `CORRECTED_DATA` (kept under its own name) |
+| `CORRECTED_DATA` | `VISIBILITY_CORRECTED` |
+| `MODEL_DATA` | `VISIBILITY_MODEL` |
 | `WEIGHT_SPECTRUM` | `WEIGHT` |
 | `FLAG` | `FLAG` |
 
-surfvis resolves this through the dataset's `data_groups` attribute rather than
-hardcoding the mapping, the same way `pfb-imaging` does, so **either name
-works** in the column selector and on the URL. `CORRECTED_DATA`, `MODEL_DATA`
-and columns that are not part of the MSv2 standard -- `RESIDUAL`, anything your
-calibration pipeline wrote -- are not renamed and appear under their own names. That is precisely why the
-residual column the chi-squared came from is plottable.
+Either name works on the URL. Columns that are
+not part of the MSv2 standard -- `RESIDUAL`, anything your calibration
+pipeline wrote -- are not renamed and appear under their own names. That is
+precisely why the residual column the chi-squared came from is plottable.
+
+Baselines are shown with the lower antenna first, as xarray-ms presents them.
+A row the MS stores the other way round (`ANTENNA1 > ANTENNA2`) is converted:
+conjugated, with its cross-hands swapped. Flags you draw on such a baseline
+are written back in the orientation the MS stores.
 
 ### Troubleshooting
 
@@ -332,7 +409,7 @@ the container.
 **`No chi-squared dataset at ...`** -- `--data` wants the zarr from
 `chi2 --dataout`, not the `--imagesout` directory of PNGs.
 
-**`Column 'X' (MSv4 'Y') not in this Measurement Set`** -- the error lists what
+**`Column 'X' not in this Measurement Set`** -- the error lists what
 *is* available in that partition. If you expected a column your pipeline wrote,
 check it exists in the MS and is not empty.
 
@@ -368,8 +445,8 @@ select a compatible subset.
 `surfvis flag-chi2` writes to the flag column of the MS you give it. There is
 no dry-run.
 
-`surfvis serve` is read-only. Manual flagging from the waterfall is planned in
-[#16](https://github.com/ratt-ru/surfvis/issues/16).
+`surfvis serve --allow-flagging` writes FLAG; see
+[Flagging by hand](#flagging-by-hand) for what protects the MS.
 
 ## Development
 
