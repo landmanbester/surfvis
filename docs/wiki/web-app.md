@@ -4,7 +4,7 @@ title: Chi-squared browser
 description: How surfvis serve links surfchi2 output to on-demand baseline waterfalls, the waterfall's correction / Stokes / flag-version controls, and the xarray-ms facts it depends on.
 tags: [web, fastapi, htmx, xarray-ms, zarr]
 timestamp: 2026-11-28
-last_verified_commit: 7f526ca
+last_verified_commit: c84ad30
 ---
 
 # Chi-squared browser
@@ -506,6 +506,27 @@ and the selection tool in `static/wf/` (see "Selection on the canvas"). Terms
   request never sees a half-done write of ours.
 - `Flagger` serialises apply/undo with a lock: FastAPI runs sync routes in a
   thread pool.
+
+## Stopping `serve` (`web/server.py`)
+
+`serve` runs over ssh, so a dropped connection (SIGHUP), Ctrl-C (SIGINT) and
+`kill` (SIGTERM) must all stop it within seconds and leave no process behind.
+uvicorn alone did neither: it ignores SIGHUP, whose default action killed the
+server mid-write with no cleanup, and on the others it waited without limit
+for open requests, after which the interpreter waited for every non-daemon
+thread (anyio's request workers, the scan warm-up). One waterfall read of a
+large MS kept a "stopped" server alive for minutes.
+
+`server.run` maps SIGHUP onto uvicorn's graceful shutdown, gives open requests
+`GRACE` (3 s), then calls `app.state.shutdown`: a recompute stops at its next
+chunk without writing, and a zarr write or flag write in progress finishes,
+with both locks then held so none starts. Then `os._exit`, the only way past a
+worker thread blocked in a read; reads lose nothing. A second signal during
+shutdown exits at once, leaving an interrupted flag write to the journal. The
+MS probe child (`flagging._opens`) has `PR_SET_PDEATHSIG`, so it dies with the
+server even on SIGKILL. `tests/test_shutdown.py` runs the real command with a
+request in flight and sends each signal. `--reload` (development only) still
+runs plain `uvicorn.run`.
 
 ## Profiling (`serve --profile DIR`)
 

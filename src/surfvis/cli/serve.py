@@ -94,8 +94,10 @@ def serve(
             err=True,
         )
     if not reload:
+        from surfvis.web import server
+
         app = create_app(data, ms, gtables=gtable, allow_flagging=allow_flagging, profile=profile)
-        uvicorn.run(app, host=host, port=port)
+        server.run(app, host=host, port=port)  # exits the process
         return
 
     # Reload re-imports the app in a worker process, so uvicorn needs an

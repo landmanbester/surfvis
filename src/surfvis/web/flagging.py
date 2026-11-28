@@ -313,6 +313,14 @@ finally:
 """
 
 
+def _die_with_parent() -> None:
+    """In a child, before exec: have Linux kill it when the server dies, however the server dies."""
+    if sys.platform.startswith("linux"):
+        import ctypes
+
+        ctypes.CDLL(None, use_errno=True).prctl(1, 9)  # PR_SET_PDEATHSIG, SIGKILL
+
+
 def _opens(ms: str) -> bool:
     """Whether the MS opens and its FLAG and FLAG_ROW can be read.
 
@@ -323,7 +331,13 @@ def _opens(ms: str) -> bool:
     import subprocess
 
     try:
-        probe = subprocess.run([sys.executable, "-c", _PROBE, ms], capture_output=True, timeout=600, check=False)
+        probe = subprocess.run(
+            [sys.executable, "-c", _PROBE, ms],
+            capture_output=True,
+            timeout=600,
+            check=False,
+            preexec_fn=_die_with_parent,
+        )
     except subprocess.TimeoutExpired:
         return False
     return probe.returncode == 0

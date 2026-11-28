@@ -670,18 +670,32 @@ def create_app(
     # baselines" edit means re-reading the whole scan, minutes on a large MS.
     job: dict = {"state": "idle"}
     job_lock = threading.Lock()
+    # Shutdown (see app.state.shutdown): a recompute stops before it writes,
+    # and a zarr write in progress finishes first.
+    stopping = threading.Event()
+    zarr_lock = threading.Lock()
+
+    class _StoppedError(Exception):
+        pass
 
     def _run_recompute(field: int, spw: int, scan: int, pairs: list[tuple[int, int]], started: float) -> None:
 
         def progress(done: int, total: int) -> None:
+            if stopping.is_set():
+                raise _StoppedError
             job.update(rows_done=done, rows_total=total)
 
         try:
             attrs = store.attrs(field, spw, scan)
             products = store.products(field, spw, scan)
             chi2, counts = recompute.cells(ms_path, attrs, products, field, spw, scan, pairs, progress)
-            store.write_cells(field, spw, scan, pairs, chi2, counts, started, ms=ms_path)
+            with zarr_lock:
+                if stopping.is_set():
+                    raise _StoppedError
+                store.write_cells(field, spw, scan, pairs, chi2, counts, started, ms=ms_path)
             job.update(state="done", finished=time.time())
+        except _StoppedError:
+            job.update(state="failed", error="The server is shutting down", finished=time.time())
         except Exception as exc:  # noqa: BLE001 - reported through /recompute/state
             job.update(state="failed", error=f"{type(exc).__name__}: {exc}", finished=time.time())
 
@@ -748,6 +762,19 @@ def create_app(
     def healthz():
         return {"status": "ok", "scans": len(store.scans), "ms": ms_path, "flagging": flagger is not None}
 
+    def shutdown(timeout: float = 120.0) -> None:
+        """Stop writing before the process exits (``server.run`` calls this).
+
+        A recompute stops at its next chunk; a zarr write or flag write in
+        progress finishes, and both locks stay held so none starts after.
+        Reads are left to die with the process.
+        """
+        stopping.set()
+        zarr_lock.acquire(timeout=timeout)
+        if flagger is not None:
+            flagger._lock.acquire(timeout=timeout)
+
+    app.state.shutdown = shutdown
     return app
 
 

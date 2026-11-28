@@ -8,6 +8,12 @@ last_verified_commit: 7f526ca
 
 # Wiki changelog
 
+## 2026-11-28 — stopping serve cleanly (verified at `c84ad30`)
+
+- **web-app.md:** new section on `web/server.py`: SIGHUP/SIGINT/SIGTERM all
+  shut down gracefully within seconds, writes in progress finish, then
+  `os._exit` past reading threads.
+
 ## 2026-11-28 — "none" in the flags menu (verified at `7f526ca`)
 
 - **web-app.md:** the waterfall's flags menu offers **none**, which hides

@@ -49,7 +49,7 @@ docker run --rm --user "$(id -u):$(id -g)" -e HOME=/tmp -v "$PWD":/src -w /src \
    PYTHONPATH=/tmp/t:/src/src:/src /tmp/t/bin/pytest tests/ -q -W ignore"
 ```
 
-That is the only way to run the full suite (140 tests; the node one skips in the container). **CI does not run them** —
+That is the only way to run the full suite (144 tests; the node one skips in the container). **CI does not run them** —
 `.github/workflows/ci.yml` installs the lightweight package only, deliberately,
 since python-casacore and numba make CI slow and brittle. Verify locally.
 
@@ -79,7 +79,7 @@ Three layers, and the boundary between them is load-bearing:
 - **`utils/`** is heavy too (`chisq.py` numba kernels, `plotting.py` matplotlib)
   and is imported only from `core/`.
 - **`web/`** is the browser: `store.py` (zarr), `msdata.py` (MS via xarray-ms
-  and arcae), `render.py` (colours + PNGs), `planes.py` (waterfall reduction), `profiling.py` (`serve --profile`), `recompute.py` (stale cells by chi2's recipe), `app.py` (FastAPI), `templates/`
+  and arcae), `render.py` (colours + PNGs), `planes.py` (waterfall reduction), `profiling.py` (`serve --profile`), `recompute.py` (stale cells by chi2's recipe), `server.py` (uvicorn and shutdown), `app.py` (FastAPI), `templates/`
   (htmx partials) and `static/app.js` (selection, hover readout, arrow keys,
   carried settings via `static/carry.mjs`, stale markers via `static/stale.mjs`, loading states, Save as PNG; a module), and `static/wf/` (the canvas waterfall as ES modules, node-tested via `tests/test_js.py`; node is not in the container). `htmx.min.js` and
   `html-to-image.js` are vendored, not loaded from a CDN: compute nodes are
@@ -236,6 +236,15 @@ registry and the next write hangs, so `_opens()` probes in a child process.
 so `gtable` in a query string must not name arbitrary paths: the term `chi2`
 used, `serve --gtable` ones, and `*.qc` terms next to the MS. Keep any new
 path-valued query parameter on an allow-list the same way.
+
+**`serve` must stop within seconds on SIGHUP, SIGINT or SIGTERM** (a dropped
+ssh connection is a SIGHUP). `web/server.py` runs uvicorn, lets writes in
+progress finish through `app.state.shutdown`, then `os._exit`s past threads
+still reading: anyio's request workers are not daemons, and the interpreter
+would otherwise wait out a minutes-long MS read. Any new background writer
+must stop or finish inside that shutdown; any new child process must die with
+the server (`flagging._die_with_parent`). `tests/test_shutdown.py` sends each
+signal to the real command.
 
 **`serve` carries no `@stimela_cab`** and must not. A long-running GUI is not a
 batch task. `generate-cabs` skips undecorated functions, which is what keeps
