@@ -202,9 +202,10 @@ def test_a_selection_drawn_over_a_saved_flag_version_is_refused(chi2_zarr, writa
     _wait_for_backup(client)
     before, _ = _flags(writable_ms)
     body = {"field": 0, "spw": 0, "scan": 1, "p": 0, "q": 2, "product": "XX", "vertices": _rect(1, 2, 4, 9)}
-    for dry_run in (True, False):
-        r = client.post("/flag", json={**body, "flagversion": "older", "dry_run": dry_run})
-        assert r.status_code == 409 and "FLAG (current)" in r.json()["detail"]
+    for version in ("older", "<none>"):
+        for dry_run in (True, False):
+            r = client.post("/flag", json={**body, "flagversion": version, "dry_run": dry_run})
+            assert r.status_code == 409 and "FLAG (current)" in r.json()["detail"]
     np.testing.assert_array_equal(_flags(writable_ms)[0], before)
 
 
@@ -341,6 +342,9 @@ def test_the_panel_offers_flagging_only_when_allowed(chi2_zarr, writable_ms):
     panel = client.get(url + "&flagversion=").text
     ctx = json.loads(html.unescape(re.search(r'data-flag="([^"]*)"', panel).group(1)))
     assert ctx == {"field": 0, "spw": 0, "scan": 1, "p": 2, "q": 0, "product": "XX", "gtable": "", "flagversion": ""}
+    assert '<option value="&lt;none&gt;" >none</option>' in panel
+    bare = client.get(url + "&flagversion=%3Cnone%3E").text
+    assert 'value="&lt;none&gt;" selected' in bare and 'class="problems"' not in bare
     names = json.loads(html.unescape(re.search(r'data-names="([^"]*)"', panel).group(1)))
     assert sorted(names) == sorted(chi2_zarr["ms"]["antenna_names"][i] for i in (0, 2))
     assert 'class="wf-allcorr" checked' in panel and "wf-apply" in panel and "wf-undo" in panel
@@ -414,6 +418,10 @@ def test_a_flag_write_reuses_the_open_scan_and_the_cached_plane(chi2_zarr, writa
     assert flagged.flags[2:4, 5:9].all() and flagged.plane is before.plane
     # Colours hold still across an edit, so the edit is what changes on screen.
     assert flagged.limits is before.limits
+    # "none" hides FLAG, keeps the gaps' flags, and shares FLAG's colours.
+    bare = plane(flagversion=msdata.NO_FLAGS)
+    assert not bare.flags[2:4, 5:9].any() and bare.plane is before.plane and bare.limits is before.limits
+    np.testing.assert_array_equal(bare.flags, bare.flags & before.flags)
     flagger.undo()
     np.testing.assert_array_equal(plane().flags, before.flags)
 

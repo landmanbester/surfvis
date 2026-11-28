@@ -157,7 +157,8 @@ add `--rcol DATA --mcol MODEL_DATA --gtable gains.qc/NET` to the command above.
 
 The waterfall panel can switch product (correlation or Stokes), subtract a
 model column, apply a QuartiCal gain term (`gains.qc/NET`) and overlay a saved
-CASA flag version, all on the fly. Those controls change the waterfall only;
+CASA flag version, or no flags at all (**none**, to see what the mask hides),
+all on the fly. Those controls change the waterfall only;
 the heatmap is what `chi2` computed, and the panel says when the two differ.
 
 ### 2. Start the server
@@ -404,7 +405,7 @@ many baselines it will touch. Whatever its scope, one selection is one edit
 and one undo. A
 pending selection follows you to the next baseline of the same scan, so one
 patch of RFI can be flagged across baselines with the arrow keys and Enter.
-Drawing is disabled while the flags menu shows a saved flag version. Before
+Drawing is disabled while the flags menu shows a saved flag version or none. Before
 its first write, a flagging session saves FLAG as a CASA flag version named
 `surfvis_before_<UTC timestamp>`, so `flagmanager` (or the flags menu) can
 restore it.

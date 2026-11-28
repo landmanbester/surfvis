@@ -778,6 +778,12 @@ def test_waterfall_bin(chi2_zarr):
     phase, _, _ = decode(client.get(base + "&quantity=phase").content)
     assert phase["colormap"] == "twilight" and phase["quantity"] == "phase"
 
+    # "none" takes FLAG's colours, even asked for first, so toggling it does not rescale.
+    bare, _, bare_flags = decode(client.get(base + "&quantity=imag&flagversion=%3Cnone%3E").content)
+    imag, _, imag_flags = decode(client.get(base + "&quantity=imag").content)
+    assert (bare["vmin"], bare["vmax"]) == (imag["vmin"], imag["vmax"])
+    assert not (bare_flags & ~imag_flags).any()
+
     assert client.get(base + "&t0=5&t1=5").status_code == 400
     assert client.get(base + "&c0=40").status_code == 400
     assert client.get(base + "&quantity=nope").status_code == 400

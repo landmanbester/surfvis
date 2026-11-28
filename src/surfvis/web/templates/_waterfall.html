@@ -52,6 +52,7 @@
     <label>flags
       <select name="flagversion"{% if "flagversion" in keep %} class="keep"{% endif %}>
         <option value="" {% if not s.flagversion %}selected{% endif %}>FLAG (current)</option>
+        <option value="{{ no_flags }}" {% if s.flagversion == no_flags %}selected{% endif %}>none</option>
         {% for name in flagversions %}
         <option value="{{ name }}" {% if name == s.flagversion %}selected{% endif %}>{{ name }}</option>
         {% endfor %}

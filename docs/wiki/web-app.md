@@ -3,8 +3,8 @@ type: reference
 title: Chi-squared browser
 description: How surfvis serve links surfchi2 output to on-demand baseline waterfalls, the waterfall's correction / Stokes / flag-version controls, and the xarray-ms facts it depends on.
 tags: [web, fastapi, htmx, xarray-ms, zarr]
-timestamp: 2026-11-27
-last_verified_commit: 2cca15c
+timestamp: 2026-11-28
+last_verified_commit: 7f526ca
 ---
 
 # Chi-squared browser
@@ -168,6 +168,12 @@ column given by its MSv4 name is translated back, so it is never listed twice.
   with no row are flagged. arcae returns these boolean columns as `uint8`, and
   wants a writable row-index array. The web layer needs no python-casacore.
   Only listed names are accepted, which also keeps the name from being a path.
+  **none** (`msdata.NO_FLAGS`, the value `<none>`; angle brackets keep it
+  apart from any version name) shows the data with no MS flags, to toggle
+  the mask off and see what it hides. Gaps and unusable gains stay flagged.
+  It shares FLAG's colour limits (the canvas route sets them from FLAG if
+  "none" is asked for first), so toggling does not rescale to the RFI
+  underneath. Drawing is disabled, as for a saved version.
 - **The column menu lists complex columns only.** The column is corrected and
   has a model subtracted, which means nothing for `WEIGHT`.
 - **Problems are reported in the panel**, not as a broken image: the

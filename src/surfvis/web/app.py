@@ -408,6 +408,7 @@ def create_app(
                 "models": _columns(ms_path, field, spw, scan, complex_only=True),
                 "products": _products(ms_path, field, spw, scan),
                 "flagversions": msdata.flag_versions(ms_path),
+                "no_flags": msdata.NO_FLAGS,
                 "quantities": msdata.QUANTITIES,
                 "s": settings,
                 "matrix": matrix,
@@ -527,7 +528,13 @@ def create_app(
             )
         if quantity not in wf.limits:  # cached with the plane; colours do not move on zoom
             with profiling.span("colour_limits"):
-                wf.limits[quantity] = planes.colour_limits(wf.plane, wf.flags, quantity)
+                # NO_FLAGS shares FLAG's limits (see cached_plane), so set them from FLAG.
+                basis = wf
+                if settings["flagversion"] == msdata.NO_FLAGS:
+                    basis = msdata.cached_plane(
+                        ms_path, field, spw, scan, name1, name2, **{**settings, "flagversion": ""}
+                    )
+                wf.limits[quantity] = planes.colour_limits(basis.plane, basis.flags, quantity)
         vmin, vmax = wf.limits[quantity]
         if wf.antenna1 == wf.antenna2:
             baseline = f"{wf.antenna1} auto"
@@ -585,10 +592,10 @@ def create_app(
         """Flag the cells inside a polygon on one baseline, or count them with ``dry_run``."""
         flagger_ = _flagger()
         if req.flagversion:
+            shows = "no flags" if req.flagversion == msdata.NO_FLAGS else f"flag version {req.flagversion!r}"
             raise HTTPException(
                 status_code=409,
-                detail=f"This waterfall shows flag version {req.flagversion!r}, not FLAG; "
-                "switch flags to FLAG (current) to flag.",
+                detail=f"This waterfall shows {shows}, not FLAG; switch flags to FLAG (current) to flag.",
             )
         try:
             group = store.group(req.field, req.spw, req.scan)

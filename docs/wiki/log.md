@@ -2,11 +2,16 @@
 type: log
 title: Wiki changelog
 description: Chronological record of what changed in the wiki and why.
-timestamp: 2026-11-27
-last_verified_commit: 2cca15c
+timestamp: 2026-11-28
+last_verified_commit: 7f526ca
 ---
 
 # Wiki changelog
+
+## 2026-11-28 — "none" in the flags menu (verified at `7f526ca`)
+
+- **web-app.md:** the waterfall's flags menu offers **none**, which hides
+  MS flags and keeps FLAG's colour limits.
 
 ## 2026-11-27 — recomputing stale cells (verified at `2cca15c`)
 

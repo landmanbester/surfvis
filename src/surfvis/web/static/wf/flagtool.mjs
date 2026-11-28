@@ -73,7 +73,8 @@ export function attach(root, api) {
   };
 
   if (ctx.flagversion) {
-    disabled = `Showing flag version ${ctx.flagversion}: switch flags to FLAG (current) to flag.`;
+    const shows = ctx.flagversion === "<none>" ? "no flags" : `flag version ${ctx.flagversion}`;
+    disabled = `Showing ${shows}: switch flags to FLAG (current) to flag.`;
   }
 
   // Data and screen coordinates of a pointer event.

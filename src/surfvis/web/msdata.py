@@ -46,6 +46,9 @@ from surfvis.web.profiling import span, timed
 ignore_xarray_ms_warnings()
 
 QUANTITIES = ("amp", "phase", "real", "imag")
+# The flags menu's "none": show the data with no MS flags at all. Angle
+# brackets keep it apart from any CASA flag version name.
+NO_FLAGS = "<none>"
 
 # Matches pfb-imaging's default. SCAN_NUMBER in the schema means one partition
 # per (field, spw, scan) -- exactly how surfchi2 groups, so a partition's time
@@ -772,7 +775,7 @@ def check(
         products.needed([product], labels_, full_jones=full)
     except ValueError as exc:
         problems.append(str(exc))
-    if flagversion and flagversion not in flag_versions(ms):
+    if flagversion and flagversion != NO_FLAGS and flagversion not in flag_versions(ms):
         problems.append(f"no flag version {flagversion!r}")
     return problems
 
@@ -825,7 +828,8 @@ def waterfall(
             relative to the start of the scan.
         model: Optional model column, subtracted after correction.
         gtable: Optional QuartiCal gain term to correct by.
-        flagversion: Optional CASA flag version to overlay instead of FLAG.
+        flagversion: Optional CASA flag version to overlay instead of FLAG, or
+            :data:`NO_FLAGS` for none.
 
     Returns:
         A :class:`Waterfall`.
@@ -966,7 +970,12 @@ def product_correlations(ms: str, field: int, spw: int, scan: int, product: str,
 
 
 def _with_flags(ms: str, field: int, spw: int, scan: int, wf: Waterfall, flagversion: str = "") -> Waterfall:
-    """``wf`` with FLAG (or a flag version) as it is on disk now added to its flags."""
+    """``wf`` with FLAG (or a flag version) as it is on disk now added to its flags.
+
+    :data:`NO_FLAGS` adds none: only the flags the data implies (gaps, gains) remain.
+    """
+    if flagversion == NO_FLAGS:
+        return wf
     ds = _open(ms, field, spw, scan)
     labels_ = [str(p) for p in ds.polarization.values]
     flags = _baseline_flags(
@@ -998,7 +1007,7 @@ def cached_plane(
     rectangle are not part of the key. ``plane`` is complex64 and ``values``
     is None, so use ``plane``; ``rect`` is None. ``limits`` is shared by every
     call with the same flag version, so colours hold still across zooms and
-    flag edits.
+    flag edits; :data:`NO_FLAGS` shares FLAG's.
 
     Keyed on the baseline as xarray-ms presents it, so the two cells of the
     symmetric heatmap share one entry instead of each reading the MS.
@@ -1021,7 +1030,9 @@ def cached_plane(
             _gtable_stamp(gtable),
         )
     wf = _with_flags(ms, field, spw, scan, entry, flagversion)
-    return replace(wf, limits=entry.limits.setdefault(flagversion, {}))
+    # "none" shares FLAG's colours, so toggling the mask shows what it hides
+    # rather than rescaling to the RFI underneath.
+    return replace(wf, limits=entry.limits.setdefault("" if flagversion == NO_FLAGS else flagversion, {}))
 
 
 _PLANES = _Coalescer()
