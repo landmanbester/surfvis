@@ -210,6 +210,40 @@ def test_a_selection_drawn_over_a_saved_flag_version_is_refused(chi2_zarr, writa
 
 
 @needs_web
+def test_no_flags_keeps_flags_colours(chi2_zarr, writable_ms):
+    """ "none" hides FLAG with FLAG's colours, even asked for first; a baseline FLAG empties scales by itself."""
+    pytest.importorskip("httpx2")
+    from fastapi.testclient import TestClient
+
+    from surfvis.web import msdata, planes
+    from surfvis.web.app import create_app
+    from surfvis.web.flagging import Flagger
+
+    names = chi2_zarr["ms"]["antenna_names"]
+    flagger = Flagger(writable_ms)
+    flagger.apply(0, 0, 1, names[0], names[2], np.array(_rect(0, 5, 0, 20)), corr_idx=[0])
+    client = TestClient(create_app(chi2_zarr["zarr"], ms=writable_ms))
+    base = "/waterfall.bin?field=0&spw=0&scan=1&c=XX&p=0&q=2&column=RESIDUAL"
+
+    def get(query):
+        head, _, flags = planes.decode(client.get(base + query).content)
+        return (head["vmin"], head["vmax"]), flags
+
+    bare, bare_flags = get("&flagversion=%3Cnone%3E")
+    live, live_flags = get("")
+    assert bare == live and live_flags[0:6, 0:21].all() and not bare_flags[0:6, 0:21].any()
+    plane = msdata.cached_plane(writable_ms, 0, 0, 1, names[0], names[2], "XX", "RESIDUAL", flagversion="<none>")
+    unmasked = planes.colour_limits(plane.plane, plane.flags, "amp")
+    assert bare != pytest.approx(unmasked)
+
+    # FLAG over the whole baseline leaves nothing to scale by: "none" scales by what it shows.
+    flagger.apply(0, 0, 1, names[0], names[2], np.array(_rect(0, 11, 0, 31)), corr_idx=[0])
+    real, _ = get("&flagversion=%3Cnone%3E&quantity=real")
+    assert real == pytest.approx(planes.colour_limits(plane.plane, plane.flags, "real"))
+    assert real != (0.0, 1.0)
+
+
+@needs_web
 def test_product_correlations_follow_full_jones_gains(chi2_zarr, writable_ms, tmp_path):
     """Corrected XX with full-Jones gains is formed from all four correlations, so all four are flagged."""
     pytest.importorskip("httpx2")

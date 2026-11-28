@@ -173,7 +173,7 @@ column given by its MSv4 name is translated back, so it is never listed twice.
   the mask off and see what it hides. Gaps and unusable gains stay flagged.
   It shares FLAG's colour limits (the canvas route sets them from FLAG if
   "none" is asked for first), so toggling does not rescale to the RFI
-  underneath. Drawing is disabled, as for a saved version.
+  underneath; a baseline FLAG covers entirely scales by what "none" shows. Drawing is disabled, as for a saved version.
 - **The column menu lists complex columns only.** The column is corrected and
   has a model subtracted, which means nothing for `WEIGHT`.
 - **Problems are reported in the panel**, not as a broken image: the

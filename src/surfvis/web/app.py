@@ -528,12 +528,15 @@ def create_app(
             )
         if quantity not in wf.limits:  # cached with the plane; colours do not move on zoom
             with profiling.span("colour_limits"):
-                # NO_FLAGS shares FLAG's limits (see cached_plane), so set them from FLAG.
+                # NO_FLAGS shares FLAG's limits (see cached_plane), so set them from
+                # FLAG, unless FLAG leaves nothing to scale by: then from what "none" shows.
                 basis = wf
                 if settings["flagversion"] == msdata.NO_FLAGS:
-                    basis = msdata.cached_plane(
+                    flagged = msdata.cached_plane(
                         ms_path, field, spw, scan, name1, name2, **{**settings, "flagversion": ""}
                     )
+                    if (~flagged.flags & np.isfinite(flagged.plane)).any():
+                        basis = flagged
                 wf.limits[quantity] = planes.colour_limits(basis.plane, basis.flags, quantity)
         vmin, vmax = wf.limits[quantity]
         if wf.antenna1 == wf.antenna2:
